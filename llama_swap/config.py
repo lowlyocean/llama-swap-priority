@@ -1,8 +1,9 @@
 """Global config and INI loader."""
 
 import os
-from dataclasses import dataclass, field
+import re
 from configparser import ConfigParser
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -35,8 +36,14 @@ class ModelRegistry:
         self.start_port = start_port
         self.work_dir = work_dir
         self.parser = ConfigParser()
-        self.parser.read(ini_path)
+        self.parser.read_string(self._clean_ini(ini_path))
         self.models: list[ModelConfig] = self._load_models()
+
+    def _clean_ini(self, ini_path: str) -> str:
+        with open(ini_path, "r") as f:
+            content = f.read()
+        content = re.sub(r"^version\s*=\s*\S*", "", content, flags=re.MULTILINE)
+        return content
 
     def _load_models(self) -> list[ModelConfig]:
         models = []

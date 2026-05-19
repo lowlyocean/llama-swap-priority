@@ -205,8 +205,44 @@ class ProxyRouter:
             )
 
     async def handle_model_list(self, request: web.Request) -> web.Response:
-        models = list(self._models.keys())
-        return web.Response(text="\n".join(models))
+        path = request.path
+
+        for inst in self._instances.values():
+            if inst.healthy and inst.process and inst.process.returncode is None:
+                backend_url = f"http://127.0.0.1:{inst.port}"
+                try:
+                    assert self._client is not None
+                    async with self._client.get(
+                        f"{backend_url}{path}",
+                        headers={
+                            k: v
+                            for k, v in request.headers.items()
+                            if k.lower() not in ("host", "connection", "content-length")
+                        },
+                    ) as resp:
+                        data = await resp.text()
+                        return web.Response(
+                            text=data,
+                            status=resp.status,
+                            content_type=resp.content_type,
+                        )
+                except Exception:
+                    continue
+
+        model_list = []
+        for model_cfg in self.registry.models:
+            model_list.append(
+                {
+                    "id": model_cfg.section_name,
+                    "object": "model",
+                    "created": 0,
+                    "owned_by": "llama-swap-priority",
+                }
+            )
+
+        return web.json_response(
+            {"object": "list", "data": model_list}
+        )
 
     async def register_routes(self) -> None:
         self._app = web.Application()
@@ -233,6 +269,12 @@ class ProxyRouter:
         router.add_route("POST", "/v1/embeddings/{model}", self.forward_request)
         router.add_route("POST", "/embeddings", self.forward_request)
         router.add_route("POST", "/embeddings/{model}", self.forward_request)
+
+        # GET routes — props
+        router.add_route("GET", "/v1/props", self.handle_model_list)
+        router.add_route("GET", "/v1/props/{model}", self.handle_model_list)
+        router.add_route("GET", "/props", self.handle_model_list)
+        router.add_route("GET", "/props/{model}", self.handle_model_list)
 
         self._client = ClientSession()
 

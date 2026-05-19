@@ -55,6 +55,16 @@ class TestModelRegistry:
         assert len(reg.models) == 1
         assert reg.models[0].section_name == "model_a"
 
+    def test_load_models_with_version_field(self, tmp_path):
+        presets = tmp_path / "presets.ini"
+        presets.write_text(
+            "version = 3\n\n[model_a]\npriority = 1\nmodel = /models/model_a.gguf\n\n[model_b]\npriority = 2\nmodel = /models/model_b.gguf\n"
+        )
+        reg = ModelRegistry(str(presets), 12000, str(tmp_path))
+        assert len(reg.models) == 2
+        assert reg.models[0].section_name == "model_a"
+        assert reg.models[1].section_name == "model_b"
+
 
 class TestModelConfig:
     def test_make_instance_url(self):
@@ -103,9 +113,8 @@ class TestInstanceManager:
         assert get_health_url(12345) == "http://127.0.0.1:12345/health"
 
 
-class TestProxyRouter:
     @pytest.mark.asyncio
-    async def test_models_list(self, tmp_path):
+    async def test_models_list_fallback(self, tmp_path):
         presets = tmp_path / "presets.ini"
         presets.write_text(
             "[model_a]\npriority = 1\nmodel = /models/model_a.gguf\n\n[model_b]\npriority = 2\nmodel = /models/model_b.gguf\n"
@@ -114,19 +123,62 @@ class TestProxyRouter:
         router = ProxyRouter(config)
         await router.register_routes()
 
-        app = router._app
-        assert app is not None
+        from aiohttp.test_utils import make_mocked_request
+
+        req = make_mocked_request("GET", "/v1/models")
+        resp = await router.handle_model_list(req)
+        assert resp.status == 200
+        import json
+
+        data = json.loads(resp.text)
+        assert data["object"] == "list"
+        assert len(data["data"]) == 2
+        ids = [m["id"] for m in data["data"]]
+        assert "model_a" in ids
+        assert "model_b" in ids
+        for m in data["data"]:
+            assert m["object"] == "model"
+            assert m["owned_by"] == "llama-swap-priority"
+
+    @pytest.mark.asyncio
+    async def test_models_list_with_running_instance(self, tmp_path):
+        presets = tmp_path / "presets.ini"
+        presets.write_text(
+            "[model_a]\npriority = 1\nmodel = /models/model_a.gguf\n\n[model_b]\npriority = 2\nmodel = /models/model_b.gguf\n"
+        )
+        config = Config(port=0, ini_path=str(presets), work_dir=str(tmp_path))
+        router = ProxyRouter(config)
+        await router.register_routes()
+
+        from contextlib import asynccontextmanager
+        from unittest.mock import AsyncMock, MagicMock
+
+        mock_resp = AsyncMock()
+        mock_resp.text = AsyncMock(return_value="backend_models_response")
+        mock_resp.status = 200
+        mock_resp.content_type = "application/json"
+
+        @asynccontextmanager
+        async def mock_get(*args, **kwargs):
+            yield mock_resp
+
+        mock_process = MagicMock()
+        mock_process.returncode = None
+
+        mock_inst = MagicMock()
+        mock_inst.healthy = True
+        mock_inst.process = mock_process
+        mock_inst.port = 12000
+
+        router._client.get = mock_get
+        router._instances["model_a"] = mock_inst
 
         from aiohttp.test_utils import make_mocked_request
 
         req = make_mocked_request("GET", "/v1/models")
         resp = await router.handle_model_list(req)
         assert resp.status == 200
-        body = resp.text
-        assert "model_a" in body
-        assert "model_b" in body
-
-        await router.cleanup()
+        assert resp.text == "backend_models_response"
 
 
 if __name__ == "__main__":

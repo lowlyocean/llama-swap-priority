@@ -2,17 +2,27 @@ version: "3.9"
 
 services:
   llama-swap-priority:
+    container_name: llama-swap-priority
     build:
       context: ./
       dockerfile_inline: |
         FROM python:3.12-slim
-        WORKDIR /app
-        COPY llama_swap/ /app/llama_swap/
-        COPY pyproject.toml /app/pyproject.toml
-        RUN pip install --no-cache-dir .
-        ENTRYPOINT ["python", "-m", "llama_swap"]
+         RUN pip install --no-cache-dir setuptools>=68
+         WORKDIR /app
+         COPY llama_swap/ /app/llama_swap/
+         COPY pyproject.toml /app/pyproject.toml
+         RUN pip install --no-cache-dir .
+         ENTRYPOINT ["python", "-m", "llama_swap"]
     env_file: ${ENV_FILE:-stack.env}
-    ports:
-      - "${PROXY_PORT:-11434}:${PROXY_PORT:-11434}"
+    network_mode: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities:
+                - gpu
     volumes:
-      - ${INPUT_PRESETS_INIT:-./presets.ini}:/etc/llama-swap-priority/presets.ini:ro
+      - ${INPUT_PRESETS_INIT:-./presets.ini}:/app/presets.ini:ro
+      - ${LLAMA_SERVER_BIN:-/usr/local/bin/llama-server}:/usr/local/bin/llama-server:ro

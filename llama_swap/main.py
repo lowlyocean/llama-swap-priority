@@ -9,9 +9,8 @@ async def main() -> None:
     config = Config()
     router = ProxyRouter(config)
 
+    port = config.start_port
     for model_cfg in router.registry.models:
-        port = config.start_port
-        router.register_model(model_cfg.section_name, port)
         port += 1
 
     try:
