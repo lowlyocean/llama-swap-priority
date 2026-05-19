@@ -1,0 +1,18 @@
+version: "3.9"
+
+services:
+  llama-swap-priority:
+    build:
+      context: ./
+      dockerfile_inline: |
+        FROM python:3.12-slim
+        WORKDIR /app
+        COPY llama_swap/ /app/llama_swap/
+        COPY pyproject.toml /app/pyproject.toml
+        RUN pip install --no-cache-dir .
+        ENTRYPOINT ["python", "-m", "llama_swap"]
+    env_file: ${ENV_FILE:-stack.env}
+    ports:
+      - "${PROXY_PORT:-11434}:${PROXY_PORT:-11434}"
+    volumes:
+      - ${INPUT_PRESETS_INIT:-./presets.ini}:/etc/llama-swap-priority/presets.ini:ro
