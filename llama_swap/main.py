@@ -1,12 +1,17 @@
 """llama-swap-proxy: priority-based router between llama-server instances."""
 
+import argparse
 import asyncio
 from llama_swap.proxy.router import ProxyRouter
 from llama_swap.config import Config
 
 
 async def main() -> None:
-    config = Config()
+    parser = argparse.ArgumentParser(description="llama-swap-proxy")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    args = parser.parse_args()
+
+    config = Config(debug=args.debug)
     router = ProxyRouter(config)
 
     port = config.start_port

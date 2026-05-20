@@ -1,12 +1,21 @@
 """Instance management — start, stop, health-check llama-server instances."""
 
-import os
-import subprocess
 import asyncio
+import os
+import re
+import subprocess
+from configparser import ConfigParser
 from dataclasses import dataclass, field
 from typing import Optional
 
 from llama_swap.config import ModelConfig
+
+
+def _clean_ini(ini_path: str) -> str:
+    with open(ini_path, "r") as f:
+        content = f.read()
+    content = re.sub(r"^version\s*=\s*\S*", "", content, flags=re.MULTILINE)
+    return content
 
 
 @dataclass
@@ -23,10 +32,10 @@ def filter_section_presets(ini_dir: str, section_name: str) -> str:
 
     Strips proxy-only fields like 'priority' before writing.
     """
-    import configparser
     ini_path = os.path.join(ini_dir, "presets.ini")
-    parser = configparser.ConfigParser()
-    parser.read(ini_path)
+    cleaned = _clean_ini(ini_path)
+    parser = ConfigParser()
+    parser.read_string(cleaned)
     proxy_fields = {"priority"}
 
     import tempfile
@@ -71,64 +80,109 @@ def filter_section_presets(ini_dir: str, section_name: str) -> str:
 _instances: dict[str, InstanceState] = {}
 
 
+async def _start_docker_container(section_name: str, port: int, ini_path: str, debug: bool = False) -> str:
+    """Start a docker container for the given model. Returns the container name."""
+    print(f"[DEBUG] Stopping existing container: {section_name}")
+
+    try:
+        await asyncio.to_thread(
+            subprocess.run,
+            ["docker", "rm", "-f", "-f", section_name],
+            capture_output=True,
+            check=True,
+            timeout=10,
+        )
+    except (subprocess.CalledProcessError, Exception):
+        pass
+
+    cmd = [
+        "docker", "run",
+        "--name", section_name,
+        "--network", "host",
+        "--gpus", "all",
+        "--env-file", "stack.env",
+        "--restart", "unless-stopped",
+        "-v", f"{os.environ.get('PRESETS_PATH', './presets.ini')}:/app/presets.ini:ro",
+        "-v", f"{os.environ.get('MODELS_PATH', './models/')}:./app/models/:ro",
+        "--entrypoint", "./llama-server",
+        "local/llama.cpp:full-cuda",
+        "--models-preset", ini_path,
+        "--host", "0.0.0.0",
+        "--port", str(port),
+    ]
+
+    print(f"[DEBUG] Running docker command: {' '.join(cmd)}")
+
+    stdout = subprocess.DEVNULL if not debug else None
+    stderr = subprocess.DEVNULL if not debug else subprocess.STDOUT
+
+    proc = subprocess.Popen(cmd, stdout=stdout, stderr=stderr)
+    return section_name
+
+
 async def start_instance(
     model_config: "ModelConfig",
+    debug: bool = False,
 ) -> InstanceState:
     """Start a llama-server instance for the given model config.
 
     Kills any existing instance for the same section_name first to ensure
     no lingering instances. GPU resources are freed immediately.
     """
+    print(f"[DEBUG] start_instance: model={model_config.section_name}, port={model_config.port}")
+
     section_name = model_config.section_name
 
     # Terminate existing instance for this model if running
     existing = _instances.get(section_name)
-    if existing and existing.process and existing.process.returncode is None:
-        existing.process.kill()
+    if existing and existing.process:
         try:
-            await asyncio.wait_for(
-                asyncio.to_thread(existing.process.wait), timeout=5
+            print(f"[DEBUG] Removing existing container: {section_name}")
+            await asyncio.to_thread(
+                subprocess.run,
+                ["docker", "rm", "-f", section_name],
+                capture_output=True,
+                check=True,
+                timeout=10,
             )
-        except asyncio.TimeoutError:
+        except (subprocess.CalledProcessError, Exception):
             pass
 
     filtered_ini = filter_section_presets(model_config.ini_dir, section_name)
+    print(f"[DEBUG] Filtered presets: {filtered_ini}")
 
-    cmd = [
-        "llama-server",
-        "--models-presets", filtered_ini,
-        "--host", "0.0.0.0",
-        "--port", str(model_config.port),
-    ]
-
-    env = os.environ.copy()
-    proc = subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    container_name = await _start_docker_container(section_name, model_config.port, filtered_ini, debug)
 
     await asyncio.sleep(0.5)
 
-    healthy = proc.returncode is None
     state = InstanceState(
         config=model_config,
         port=model_config.port,
-        process=proc,
-        healthy=healthy,
+        process=None,
+        healthy=True,
         current_priority=model_config.priority,
     )
     _instances[section_name] = state
     return state
 
 
-async def stop_instance(model_name: str) -> None:
+async def stop_instance(model_name: str, debug: bool = False) -> None:
     """Stop and remove an instance. Immediately frees GPU resources."""
+    print(f"[DEBUG] stop_instance: model={model_name}")
     inst = _instances.pop(model_name, None)
-    if inst and inst.process and inst.process.returncode is None:
-        inst.process.kill()
+    if inst:
         try:
-            await asyncio.wait_for(
-                asyncio.to_thread(inst.process.wait), timeout=5
+            print(f"[DEBUG] Removing container: {model_name}")
+            await asyncio.to_thread(
+                subprocess.run,
+                ["docker", "rm", "-f", model_name],
+                capture_output=True,
+                check=True,
+                timeout=10,
             )
-        except asyncio.TimeoutError:
-            pass
+            print(f"[DEBUG] Container removed: {model_name}")
+        except (subprocess.CalledProcessError, Exception) as e:
+            print(f"[DEBUG] Failed to remove container {model_name}: {e}")
 
 
 def get_health_url(port: int) -> str:

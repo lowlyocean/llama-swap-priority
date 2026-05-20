@@ -15,6 +15,7 @@ class Config:
     start_port: int = 12000
     work_dir: str = "."
     binary: str = "llama-server"
+    debug: bool = False
 
 
 @dataclass

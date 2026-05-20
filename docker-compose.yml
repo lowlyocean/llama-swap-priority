@@ -7,6 +7,17 @@ services:
       context: ./
       dockerfile_inline: |
         FROM python:3.12-slim
+         RUN apt-get update && apt-get install -y curl \
+            && rm -rf /var/lib/apt/lists/* \
+            && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+            && chmod a+r /etc/apt/keyrings/docker.asc \
+            && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
+                https://download.docker.com/linux/debian \
+                $(. /etc/os-release && grep VERSION_CODENAME /etc/os-release | cut -d'=' -f2) stable" \
+                > /etc/apt/sources.list.d/docker.list \
+            && apt-get update \
+            && apt-get install -y docker-ce-cli \
+            && rm -rf /var/lib/apt/lists/*
          RUN pip install --no-cache-dir setuptools>=68
          WORKDIR /app
          COPY llama_swap/ /app/llama_swap/
@@ -24,5 +35,6 @@ services:
               capabilities:
                 - gpu
     volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
       - ${INPUT_PRESETS_INIT:-./presets.ini}:/app/presets.ini:ro
-      - ${LLAMA_SERVER_BIN:-/usr/local/bin/llama-server}:/usr/local/bin/llama-server:ro
+      - ${MODELS_PATH:-./models/}:/app/models/:ro

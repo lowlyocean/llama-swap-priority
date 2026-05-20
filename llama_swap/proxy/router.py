@@ -98,7 +98,11 @@ class ProxyRouter:
             except (json.JSONDecodeError, ValueError):
                 model = None
 
+        if self.config.debug:
+            print(f"[DEBUG] Incoming request: path={request.path}, model={model}")
+
         if model not in self._models:
+            print(f"[DEBUG] Unknown model: {model}")
             return web.json_response(
                 {"error": f"unknown model: {model}"}, status=404
             )
@@ -106,14 +110,19 @@ class ProxyRouter:
         model_config = self._models[model]
         new_priority = model_config.priority
 
+        print(f"[DEBUG] Routing: model={model}, priority={new_priority}")
+
         # Preemption logic
         highest = self._get_highest_instance_priority()
 
+        print(f"[DEBUG] Highest running priority: {highest}")
+
         if new_priority > highest:
-            # Higher priority request — terminate lower-priority instances
+            print(f"[DEBUG] Preemption: new priority {new_priority} > highest {highest}")
             to_terminate = self._find_instance_to_terminate(new_priority)
             while to_terminate:
-                await stop_instance(to_terminate)
+                print(f"[DEBUG] Terminating instance: {to_terminate}")
+                await stop_instance(to_terminate, debug=self.config.debug)
                 self._instances[to_terminate] = InstanceState(
                     current_priority=0,
                     healthy=False,
@@ -124,9 +133,9 @@ class ProxyRouter:
                 else:
                     break
         elif new_priority <= highest:
-            # Equal or lower priority — reject if no free instance
             running_inst = self._instances.get(model)
             if not (running_inst and running_inst.healthy):
+                print(f"[DEBUG] No free instance, returning 429")
                 return web.json_response(
                     {
                         "error": "server busy",
@@ -136,15 +145,22 @@ class ProxyRouter:
                     status=429,
                 )
 
-        # Start instance if not already running
         inst = self._instances.get(model)
         if not inst or not inst.healthy:
-            await start_instance(model_config)
+            print(f"[DEBUG] Starting instance for model={model}")
+            await start_instance(model_config, debug=self.config.debug)
             inst = self._instances.get(model)
             if inst:
                 inst.healthy = True
 
-        backend_url = model_config.base_url
+        inst = self._instances.get(model)
+        if inst:
+            backend_host = "http://127.0.0.1:{port}".format(port=inst.port)
+        else:
+            backend_host = "http://127.0.0.1:{port}".format(port=model_config.port)
+
+        print(f"[DEBUG] Forwarding to backend: {backend_host}{request.path}")
+
         path = request.path
         headers = {
             k: v
@@ -154,10 +170,12 @@ class ProxyRouter:
 
         assert self._client is not None
         resp = await self._client.post(
-            f"{backend_url}{path}",
+            f"{backend_host}{path}",
             headers=headers,
             data=body,
         )
+
+        print(f"[DEBUG] Backend response status: {resp.status}")
 
         # Stream SSE or return JSON depending on content type
         content_type = resp.content_type or ""
@@ -194,6 +212,7 @@ class ProxyRouter:
                 data = await resp.read()
                 data = {"error": data.decode()} if isinstance(data, bytes) else data
 
+            print(f"[DEBUG] Returning response status: {resp.status}")
             return web.json_response(
                 data,
                 status=resp.status,
@@ -208,7 +227,7 @@ class ProxyRouter:
         path = request.path
 
         for inst in self._instances.values():
-            if inst.healthy and inst.process and inst.process.returncode is None:
+            if inst.healthy:
                 backend_url = f"http://127.0.0.1:{inst.port}"
                 try:
                     assert self._client is not None
@@ -308,7 +327,7 @@ class ProxyRouter:
         if self._client:
             await self._client.close()
         for name in list(self._instances):
-            await stop_instance(name)
+            await stop_instance(name, debug=self.config.debug)
         if self._runner:
             await self._runner.cleanup()
 
