@@ -24,6 +24,7 @@ class InstanceState:
     port: int = 0
     process: Optional[subprocess.Popen] = None
     healthy: bool = False
+    running: bool = False
     current_priority: int = 0
 
 

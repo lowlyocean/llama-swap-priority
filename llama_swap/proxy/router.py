@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import signal
 
 from aiohttp import ClientSession, web
 
@@ -29,6 +30,7 @@ class ProxyRouter:
         self._client: ClientSession | None = None
         self._runner: web.AppRunner | None = None
         self._health_task: asyncio.Task[None] | None = None
+        self._stop_event: asyncio.Event | None = None
 
         # Register models from registry
         port = config.start_port
@@ -46,39 +48,79 @@ class ProxyRouter:
             port += 1
 
     def _get_highest_instance_priority(self) -> int:
-        """Return the highest current_priority among healthy instances."""
+        """Return the highest current_priority among running instances.
+
+        Uses self._models to get priority since docker containers don't set
+        inst.config (it's None). Falls back to inst.current_priority if
+        model not in _models.
+        """
         max_priority = 0
-        for inst in self._instances.values():
-            if inst.healthy and inst.config:
-                if inst.current_priority > max_priority:
-                    max_priority = inst.current_priority
+        for name, inst in self._instances.items():
+            if not inst.running:
+                continue
+            # Get priority from model config (works for docker instances)
+            model_cfg = self._models.get(name)
+            if model_cfg:
+                pri = model_cfg.priority
+            else:
+                pri = inst.current_priority
+            if pri > max_priority:
+                max_priority = pri
         return max_priority
 
     def _find_instance_to_terminate(self, new_priority: int) -> str | None:
         """Find a running instance with priority lower than the new request's priority."""
         for name, inst in self._instances.items():
-            if inst.healthy and inst.config:
-                if inst.current_priority < new_priority:
-                    return name
+            if not inst.running:
+                continue
+            model_cfg = self._models.get(name)
+            if model_cfg:
+                pri = model_cfg.priority
+            else:
+                pri = inst.current_priority
+            if pri < new_priority:
+                return name
         return None
 
-    async def _health_check(self) -> None:
-        """Periodically check all running instances and update their state."""
-        try:
-            import aiohttp
+    async def _check_instance_status(self, port: int) -> bool:
+        """Check if an instance is running and not sleeping.
 
+        Returns True if the instance is healthy and actively serving.
+        Checks /props endpoint for the top-level 'is_sleeping' boolean field.
+        """
+        try:
+            async with self._client.get(
+                f"http://127.0.0.1:{port}/props",
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                if resp.status != 200:
+                    return False
+                data = await resp.json()
+                is_sleeping = data.get("is_sleeping", False)
+                return not is_sleeping
+        except Exception:
+            return False
+
+    async def _health_check(self) -> None:
+        """Periodically check all running instances and update their state.
+
+        Uses /props endpoint to get the top-level 'is_sleeping' boolean field.
+        Sets inst.running = True when the instance is up and serving.
+        Sets inst.healthy = False when the instance is sleeping.
+        """
+        try:
             while True:
                 for name, inst in list(self._instances.items()):
                     if inst.process and inst.process.returncode is not None:
                         inst.healthy = False
                     elif inst.process:
+                        inst.healthy = await self._check_instance_status(inst.port)
+                    else:
                         try:
-                            async with aiohttp.ClientSession() as sess:
-                                async with sess.get(
-                                    f"http://127.0.0.1:{inst.port}/health",
-                                    timeout=aiohttp.ClientTimeout(total=2),
-                                ) as resp:
-                                    inst.healthy = resp.status == 200
+                            healthy = await self._check_instance_status(inst.port)
+                            inst.healthy = healthy
+                            if healthy and not inst.running:
+                                inst.running = True
                         except Exception:
                             inst.healthy = False
                 await asyncio.sleep(5)
@@ -123,10 +165,10 @@ class ProxyRouter:
             while to_terminate:
                 print(f"[DEBUG] Terminating instance: {to_terminate}")
                 await stop_instance(to_terminate, debug=self.config.debug)
-                self._instances[to_terminate] = InstanceState(
-                    current_priority=0,
-                    healthy=False,
-                )
+                inst = self._instances.get(to_terminate)
+                if inst:
+                    inst.running = False
+                    inst.healthy = False
                 highest = self._get_highest_instance_priority()
                 if new_priority > highest:
                     to_terminate = self._find_instance_to_terminate(new_priority)
@@ -134,7 +176,7 @@ class ProxyRouter:
                     break
         elif new_priority <= highest:
             running_inst = self._instances.get(model)
-            if not (running_inst and running_inst.healthy):
+            if not (running_inst and running_inst.running):
                 print(f"[DEBUG] No free instance, returning 429")
                 return web.json_response(
                     {
@@ -146,11 +188,12 @@ class ProxyRouter:
                 )
 
         inst = self._instances.get(model)
-        if not inst or not inst.healthy:
+        if not inst or not inst.running:
             print(f"[DEBUG] Starting instance for model={model}")
             await start_instance(model_config, debug=self.config.debug)
             inst = self._instances.get(model)
             if inst:
+                inst.running = True
                 inst.healthy = True
 
         inst = self._instances.get(model)
@@ -213,15 +256,12 @@ class ProxyRouter:
                 data = {"error": data.decode()} if isinstance(data, bytes) else data
 
             print(f"[DEBUG] Returning response status: {resp.status}")
-            return web.json_response(
-                data,
-                status=resp.status,
-                headers={
-                    k: v
-                    for k, v in resp.headers.items()
-                    if k.lower() not in ("transfer-encoding", "connection")
-                },
-            )
+            filtered_headers = {
+                k: v
+                for k, v in resp.headers.items()
+                if k.lower() not in ("transfer-encoding", "connection")
+            }
+            return web.json_response(data, status=resp.status, headers=filtered_headers)
 
     async def handle_model_list(self, request: web.Request) -> web.Response:
         path = request.path
@@ -264,7 +304,8 @@ class ProxyRouter:
         )
 
     async def register_routes(self) -> None:
-        self._app = web.Application()
+        if self._app is None:
+            self._app = web.Application()
         router = self._app.router
 
         # GET routes
@@ -298,11 +339,22 @@ class ProxyRouter:
         self._client = ClientSession()
 
     async def run(self) -> None:
-        if self._app is None:
-            await self.register_routes()
+        self._app = web.Application()
+
+        self._stop_event = asyncio.Event()
+
+        async def _shutdown_handler(sig: int) -> None:
+            print(f"[PROXY] Received signal {sig}, initiating shutdown...")
+            self._stop_event.set()
+
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, lambda s=sig: asyncio.ensure_future(_shutdown_handler(s)))
 
         # Start health check loop
         self._health_task = asyncio.create_task(self._health_check())
+
+        await self.register_routes()
 
         runner = web.AppRunner(self._app)
         await runner.setup()
@@ -311,25 +363,26 @@ class ProxyRouter:
         print(f"Proxy listening on {self.config.host}:{self.config.port}")
         self._runner = runner
         try:
-            await asyncio.Event().wait()
-        except (asyncio.CancelledError, KeyboardInterrupt):
+            await self._stop_event.wait()
+        except asyncio.CancelledError:
             pass
         finally:
             await self.cleanup()
 
     async def cleanup(self) -> None:
+        print("[PROXY] Cleaning up...")
         if self._health_task:
             self._health_task.cancel()
             try:
                 await self._health_task
             except asyncio.CancelledError:
                 pass
+        if self._runner:
+            await self._runner.cleanup()
         if self._client:
             await self._client.close()
         for name in list(self._instances):
             await stop_instance(name, debug=self.config.debug)
-        if self._runner:
-            await self._runner.cleanup()
 
     async def stop(self) -> None:
         await self.cleanup()
