@@ -177,7 +177,8 @@ async def start_instance(
 async def stop_instance(model_name: str, debug: bool = False) -> None:
     """Stop and remove an instance. Immediately frees GPU resources."""
     print(f"[DEBUG] stop_instance: model={model_name}")
-    container_name = f"llama_server_{model_name}"
+    safe = model_name.replace(":", "-").replace("/", "-").replace(" ", "-")
+    container_name = f"llama_server_{safe}"
     inst = _instances.pop(model_name, None)
     if inst:
         try:
