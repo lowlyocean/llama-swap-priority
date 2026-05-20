@@ -98,7 +98,7 @@ async def _start_docker_container(section_name: str, port: int, ini_path: str, d
     except (subprocess.CalledProcessError, Exception):
         pass
 
-    env_file = os.environ.get("ENV_FILE", "stack.env")
+    env_file = os.environ.get("ENV_FILE", "./.env")
 
     cmd = [
         "docker", "run",
@@ -107,11 +107,12 @@ async def _start_docker_container(section_name: str, port: int, ini_path: str, d
         "--gpus", "all",
         "--env-file", "./.env",
         "--restart", "unless-stopped",
-        "-v", "./presets.ini:/app/presets.ini:ro",
-        "-v", "./models/:/app/models/:ro",
+        "-v", f"""{os.environ.get("MODELS_PATH", "./models/")}:/app/models/:ro""",
+        "-v", f"{env_file}:/app/.env:ro",
+        "--mount", f"type=bind,source={ini_path},target=/app/presets.ini,readonly",
         "--entrypoint", "./llama-server",
         os.environ.get("SERVER_IMAGE", "local/llama.cpp:full-cuda"),
-        "--models-preset", ini_path,
+        "--models-preset", "./presets.ini",
         "--host", "0.0.0.0",
         "--port", str(port),
     ]

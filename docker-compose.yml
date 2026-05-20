@@ -39,3 +39,5 @@ services:
       - ${ENV_FILE:-./stack.env}:/app/.env:ro
       - ${INPUT_PRESETS_INIT:-./presets.ini}:/app/presets.ini:ro
       - ${MODELS_PATH:-./models/}:/app/models/:ro
+      - /tmp:/tmp
+ 
