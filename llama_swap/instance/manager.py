@@ -82,12 +82,15 @@ _instances: dict[str, InstanceState] = {}
 
 async def _start_docker_container(section_name: str, port: int, ini_path: str, debug: bool = False) -> str:
     """Start a docker container for the given model. Returns the container name."""
-    print(f"[DEBUG] Stopping existing container: {section_name}")
+    safe = section_name.replace(":", "-").replace("/", "-").replace(" ", "-")
+    container_name = f"llama_server_{safe}"
+
+    print(f"[DEBUG] Stopping existing container: {container_name}")
 
     try:
         await asyncio.to_thread(
             subprocess.run,
-            ["docker", "rm", "-f", "-f", section_name],
+            ["docker", "rm", "-f", "-f", container_name],
             capture_output=True,
             check=True,
             timeout=10,
@@ -95,17 +98,19 @@ async def _start_docker_container(section_name: str, port: int, ini_path: str, d
     except (subprocess.CalledProcessError, Exception):
         pass
 
+    env_file = os.environ.get("ENV_FILE", "stack.env")
+
     cmd = [
         "docker", "run",
-        "--name", section_name,
+        "--name", container_name,
         "--network", "host",
         "--gpus", "all",
-        "--env-file", "stack.env",
+        "--env-file", "./.env",
         "--restart", "unless-stopped",
-        "-v", f"{os.environ.get('PRESETS_PATH', './presets.ini')}:/app/presets.ini:ro",
-        "-v", f"{os.environ.get('MODELS_PATH', './models/')}:./app/models/:ro",
+        "-v", "./presets.ini:/app/presets.ini:ro",
+        "-v", "./models/:/app/models/:ro",
         "--entrypoint", "./llama-server",
-        "local/llama.cpp:full-cuda",
+        os.environ.get("SERVER_IMAGE", "local/llama.cpp:full-cuda"),
         "--models-preset", ini_path,
         "--host", "0.0.0.0",
         "--port", str(port),
@@ -132,15 +137,17 @@ async def start_instance(
     print(f"[DEBUG] start_instance: model={model_config.section_name}, port={model_config.port}")
 
     section_name = model_config.section_name
+    safe = section_name.replace(":", "-").replace("/", "-").replace(" ", "-")
+    container_name = f"llama_server_{safe}"
 
     # Terminate existing instance for this model if running
     existing = _instances.get(section_name)
     if existing and existing.process:
         try:
-            print(f"[DEBUG] Removing existing container: {section_name}")
+            print(f"[DEBUG] Removing existing container: {container_name}")
             await asyncio.to_thread(
                 subprocess.run,
-                ["docker", "rm", "-f", section_name],
+                ["docker", "rm", "-f", container_name],
                 capture_output=True,
                 check=True,
                 timeout=10,
@@ -151,7 +158,7 @@ async def start_instance(
     filtered_ini = filter_section_presets(model_config.ini_dir, section_name)
     print(f"[DEBUG] Filtered presets: {filtered_ini}")
 
-    container_name = await _start_docker_container(section_name, model_config.port, filtered_ini, debug)
+    await _start_docker_container(section_name, model_config.port, filtered_ini, debug)
 
     await asyncio.sleep(0.5)
 
@@ -169,20 +176,21 @@ async def start_instance(
 async def stop_instance(model_name: str, debug: bool = False) -> None:
     """Stop and remove an instance. Immediately frees GPU resources."""
     print(f"[DEBUG] stop_instance: model={model_name}")
+    container_name = f"llama_server_{model_name}"
     inst = _instances.pop(model_name, None)
     if inst:
         try:
-            print(f"[DEBUG] Removing container: {model_name}")
+            print(f"[DEBUG] Removing container: {container_name}")
             await asyncio.to_thread(
                 subprocess.run,
-                ["docker", "rm", "-f", model_name],
+                ["docker", "rm", "-f", container_name],
                 capture_output=True,
                 check=True,
                 timeout=10,
             )
-            print(f"[DEBUG] Container removed: {model_name}")
+            print(f"[DEBUG] Container removed: {container_name}")
         except (subprocess.CalledProcessError, Exception) as e:
-            print(f"[DEBUG] Failed to remove container {model_name}: {e}")
+            print(f"[DEBUG] Failed to remove container {container_name}: {e}")
 
 
 def get_health_url(port: int) -> str:

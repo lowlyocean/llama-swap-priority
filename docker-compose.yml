@@ -24,8 +24,8 @@ services:
          COPY pyproject.toml /app/pyproject.toml
          RUN pip install --no-cache-dir .
          ENTRYPOINT ["python", "-m", "llama_swap"]
-    env_file: ${ENV_FILE:-stack.env}
     network_mode: host
+    env_file: ${ENV_FILE:-./stack.env}
     deploy:
       resources:
         reservations:
@@ -36,5 +36,6 @@ services:
                 - gpu
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - ${ENV_FILE:-./stack.env}:/app/.env:ro
       - ${INPUT_PRESETS_INIT:-./presets.ini}:/app/presets.ini:ro
       - ${MODELS_PATH:-./models/}:/app/models/:ro
