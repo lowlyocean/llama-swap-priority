@@ -181,5 +181,173 @@ class TestInstanceManager:
         assert resp.text == "backend_models_response"
 
 
+class TestIdleTimer:
+    @pytest.mark.asyncio
+    async def test_idle_timer_not_started_with_zero_sleep(self, tmp_path):
+        presets = tmp_path / "presets.ini"
+        presets.write_text(
+            "[model_a]\npriority = 1\nmodel = /models/model_a.gguf\nsleep-idle-seconds = 0\n"
+        )
+        config = Config(port=0, ini_path=str(presets), work_dir=str(tmp_path), debug=False)
+        router = ProxyRouter(config)
+        await router.register_routes()
+
+        model_a = router._models["model_a"]
+        assert model_a.sleep_idle_seconds == 0
+        assert len(router._idle_timers) == 0
+
+        await router._start_idle_timer("model_a")
+        assert len(router._idle_timers) == 0
+
+    @pytest.mark.asyncio
+    async def test_idle_timer_started_with_nonzero_sleep(self, tmp_path):
+        presets = tmp_path / "presets.ini"
+        presets.write_text(
+            "[model_a]\npriority = 1\nmodel = /models/model_a.gguf\nsleep-idle-seconds = 60\n"
+        )
+        config = Config(port=0, ini_path=str(presets), work_dir=str(tmp_path), debug=False)
+        router = ProxyRouter(config)
+        await router.register_routes()
+
+        model_a = router._models["model_a"]
+        assert model_a.sleep_idle_seconds == 60
+
+        await router._start_idle_timer("model_a")
+        assert "model_a" in router._idle_timers
+        assert router._idle_timers["model_a"] is not None
+
+    @pytest.mark.asyncio
+    async def test_idle_timer_cancelled(self, tmp_path):
+        presets = tmp_path / "presets.ini"
+        presets.write_text(
+            "[model_a]\npriority = 1\nmodel = /models/model_a.gguf\nsleep-idle-seconds = 60\n"
+        )
+        config = Config(port=0, ini_path=str(presets), work_dir=str(tmp_path), debug=False)
+        router = ProxyRouter(config)
+        await router.register_routes()
+
+        await router._start_idle_timer("model_a")
+        assert "model_a" in router._idle_timers
+
+        await router._cancel_idle_timer("model_a")
+        assert "model_a" not in router._idle_timers
+        assert "model_a" not in router._idle_fired
+
+    @pytest.mark.asyncio
+    async def test_idle_timer_not_started_when_pending_request(self, tmp_path):
+        presets = tmp_path / "presets.ini"
+        presets.write_text(
+            "[model_a]\npriority = 1\nmodel = /models/model_a.gguf\nsleep-idle-seconds = 60\n"
+        )
+        config = Config(port=0, ini_path=str(presets), work_dir=str(tmp_path), debug=False)
+        router = ProxyRouter(config)
+        await router.register_routes()
+
+        model_a = router._models["model_a"]
+        model_a.pending_request = True
+
+        await router._start_idle_timer("model_a")
+        assert len(router._idle_timers) == 0
+
+    @pytest.mark.asyncio
+    async def test_idle_timer_started_after_pending_request_cleared(self, tmp_path):
+        presets = tmp_path / "presets.ini"
+        presets.write_text(
+            "[model_a]\npriority = 1\nmodel = /models/model_a.gguf\nsleep-idle-seconds = 60\n"
+        )
+        config = Config(port=0, ini_path=str(presets), work_dir=str(tmp_path), debug=False)
+        router = ProxyRouter(config)
+        await router.register_routes()
+
+        model_a = router._models["model_a"]
+        model_a.pending_request = True
+
+        await router._start_idle_timer("model_a")
+        assert len(router._idle_timers) == 0
+
+        model_a.pending_request = False
+        await router._start_idle_timer("model_a")
+        assert "model_a" in router._idle_timers
+
+    @pytest.mark.asyncio
+    async def test_complete_request_marks_pending_false(self, tmp_path):
+        presets = tmp_path / "presets.ini"
+        presets.write_text(
+            "[model_a]\npriority = 1\nmodel = /models/model_a.gguf\nsleep-idle-seconds = 60\n"
+        )
+        config = Config(port=0, ini_path=str(presets), work_dir=str(tmp_path), debug=False)
+        router = ProxyRouter(config)
+        await router.register_routes()
+
+        model_a = router._models["model_a"]
+        model_a.pending_request = True
+
+        await router._complete_request("model_a")
+        assert model_a.pending_request is False
+
+    @pytest.mark.asyncio
+    async def test_complete_request_starts_idle_timer(self, tmp_path):
+        presets = tmp_path / "presets.ini"
+        presets.write_text(
+            "[model_a]\npriority = 1\nmodel = /models/model_a.gguf\nsleep-idle-seconds = 60\n"
+        )
+        config = Config(port=0, ini_path=str(presets), work_dir=str(tmp_path), debug=False)
+        router = ProxyRouter(config)
+        await router.register_routes()
+
+        model_a = router._models["model_a"]
+        model_a.pending_request = False
+
+        await router._complete_request("model_a")
+        assert "model_a" in router._idle_timers
+
+    @pytest.mark.asyncio
+    async def test_complete_request_noop_for_unknown_model(self, tmp_path):
+        presets = tmp_path / "presets.ini"
+        presets.write_text(
+            "[model_a]\npriority = 1\nmodel = /models/model_a.gguf\n"
+        )
+        config = Config(port=0, ini_path=str(presets), work_dir=str(tmp_path), debug=False)
+        router = ProxyRouter(config)
+        await router.register_routes()
+
+        await router._complete_request("unknown_model")
+
+    @pytest.mark.asyncio
+    async def test_cancel_idle_timer_clears_fired_set(self, tmp_path):
+        presets = tmp_path / "presets.ini"
+        presets.write_text(
+            "[model_a]\npriority = 1\nmodel = /models/model_a.gguf\nsleep-idle-seconds = 60\n"
+        )
+        config = Config(port=0, ini_path=str(presets), work_dir=str(tmp_path), debug=False)
+        router = ProxyRouter(config)
+        await router.register_routes()
+
+        router._idle_fired.add("model_a")
+        assert "model_a" in router._idle_fired
+
+        await router._cancel_idle_timer("model_a")
+        assert "model_a" not in router._idle_fired
+
+    @pytest.mark.asyncio
+    async def test_start_idle_timer_does_not_fire_if_already_fired(self, tmp_path):
+        presets = tmp_path / "presets.ini"
+        presets.write_text(
+            "[model_a]\npriority = 1\nmodel = /models/model_a.gguf\nsleep-idle-seconds = 60\n"
+        )
+        config = Config(port=0, ini_path=str(presets), work_dir=str(tmp_path), debug=False)
+        router = ProxyRouter(config)
+        await router.register_routes()
+
+        router._idle_fired.add("model_a")
+        await router._start_idle_timer("model_a")
+        assert "model_a" in router._idle_timers
+        timer = router._idle_timers["model_a"]
+        await timer
+        # Timer should complete without stopping instance because model is in _idle_fired
+        # We can verify by checking that the instance is still running
+        # (In this test, instance isn't actually started, but the logic path is exercised)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

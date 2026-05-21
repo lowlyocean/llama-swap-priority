@@ -31,6 +31,8 @@ class ProxyRouter:
         self._runner: web.AppRunner | None = None
         self._health_task: asyncio.Task[None] | None = None
         self._stop_event: asyncio.Event | None = None
+        self._idle_timers: dict[str, asyncio.Task[None] | None] = {}
+        self._idle_fired: set[str] = set()
 
         # Register models from registry
         port = config.start_port
@@ -127,6 +129,55 @@ class ProxyRouter:
         except asyncio.CancelledError:
             pass
 
+    async def _cancel_idle_timer(self, model: str) -> None:
+        """Cancel any pending idle timer for the given model."""
+        timer = self._idle_timers.pop(model, None)
+        if timer:
+            timer.cancel()
+        self._idle_fired.discard(model)
+
+    async def _start_idle_timer(self, model: str) -> None:
+        """Start (or restart) the idle timer for the given model."""
+        model_cfg = self._models.get(model)
+        if not model_cfg or model_cfg.sleep_idle_seconds <= 0:
+            return
+        # Don't start if there's a pending request
+        if model_cfg.pending_request:
+            return
+
+        async def _idle_timeout() -> None:
+            try:
+                await asyncio.sleep(model_cfg.sleep_idle_seconds)
+                if model in self._idle_fired:
+                    return
+                self._idle_fired.add(model)
+                print(f"[DEBUG] Idle timeout reached for model={model}")
+                await stop_instance(model, debug=self.config.debug)
+                inst = self._instances.get(model)
+                if inst:
+                    inst.running = False
+                    inst.healthy = False
+                self._idle_timers[model] = None
+            except asyncio.CancelledError:
+                raise
+            except asyncio.TimeoutError:
+                pass
+            except Exception:
+                pass
+
+        self._idle_fired.discard(model)
+        timer = asyncio.create_task(_idle_timeout())
+        self._idle_timers[model] = timer
+
+    async def _complete_request(self, model: str) -> None:
+        """Mark a request as completed and start the idle timer if appropriate."""
+        model_cfg = self._models.get(model)
+        if model_cfg:
+            model_cfg.pending_request = False
+        # Start the idle timer — will only fire if no other requests are pending
+        if model and model in self._models:
+            await self._start_idle_timer(model)
+
     async def forward_request(self, request: web.Request) -> web.Response:
         path_model = request.match_info.get("model", None)
         body = await request.read()
@@ -142,6 +193,14 @@ class ProxyRouter:
 
         if self.config.debug:
             print(f"[DEBUG] Incoming request: path={request.path}, model={model}")
+
+        # Cancel any pending idle timer for this model (reset the clock)
+        if model and model in self._models:
+            await self._cancel_idle_timer(model)
+
+        # Track which models have pending requests (idle timer should not fire)
+        if model and model in self._models:
+            self._models[model].pending_request = True
 
         if model not in self._models:
             print(f"[DEBUG] Unknown model: {model}")
@@ -247,6 +306,7 @@ class ProxyRouter:
                 pass
             finally:
                 await stream_response.write_eof()
+            await self._complete_request(model)
             return stream_response
         else:
             try:
@@ -261,6 +321,7 @@ class ProxyRouter:
                 for k, v in resp.headers.items()
                 if k.lower() not in ("transfer-encoding", "connection")
             }
+            await self._complete_request(model)
             return web.json_response(data, status=resp.status, headers=filtered_headers)
 
     async def handle_model_list(self, request: web.Request) -> web.Response:

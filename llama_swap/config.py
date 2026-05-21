@@ -27,6 +27,8 @@ class ModelConfig:
     base_url: str = ""
     options: dict = field(default_factory=dict)
     current_priority: int = 0
+    sleep_idle_seconds: int = 0
+    pending_request: bool = False
 
 
 class ModelRegistry:
@@ -52,6 +54,9 @@ class ModelRegistry:
             if not self.parser.has_option(section, "priority"):
                 continue
             priority = int(self.parser.get(section, "priority"))
+            sleep_idle = 0
+            if self.parser.has_option(section, "sleep-idle-seconds"):
+                sleep_idle = int(self.parser.get(section, "sleep-idle-seconds"))
             models.append(
                 ModelConfig(
                     section_name=section,
@@ -59,6 +64,7 @@ class ModelRegistry:
                     ini_dir=self.work_dir,
                     priority=priority,
                     current_priority=priority,
+                    sleep_idle_seconds=sleep_idle,
                 )
             )
         return models

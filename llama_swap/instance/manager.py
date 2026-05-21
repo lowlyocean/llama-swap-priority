@@ -37,7 +37,7 @@ def filter_section_presets(ini_dir: str, section_name: str) -> str:
     cleaned = _clean_ini(ini_path)
     parser = ConfigParser()
     parser.read_string(cleaned)
-    proxy_fields = {"priority"}
+    proxy_fields = {"priority", "sleep-idle-seconds"}
 
     import tempfile
     tmp = tempfile.NamedTemporaryFile(
