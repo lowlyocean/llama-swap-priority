@@ -3,6 +3,7 @@
 import asyncio
 import json
 import pytest
+import time
 import urllib.request
 import threading
 from aiohttp import web
@@ -244,7 +245,7 @@ class TestIdleTimer:
         await router.register_routes()
 
         model_a = router._models["model_a"]
-        model_a.pending_request = True
+        model_a.pending_requests = 1
 
         await router._start_idle_timer("model_a")
         assert len(router._idle_timers) == 0
@@ -260,12 +261,12 @@ class TestIdleTimer:
         await router.register_routes()
 
         model_a = router._models["model_a"]
-        model_a.pending_request = True
+        model_a.pending_requests = 1
 
         await router._start_idle_timer("model_a")
         assert len(router._idle_timers) == 0
 
-        model_a.pending_request = False
+        model_a.pending_requests = 0
         await router._start_idle_timer("model_a")
         assert "model_a" in router._idle_timers
 
@@ -280,10 +281,10 @@ class TestIdleTimer:
         await router.register_routes()
 
         model_a = router._models["model_a"]
-        model_a.pending_request = True
+        model_a.pending_requests = 1
 
         await router._complete_request("model_a")
-        assert model_a.pending_request is False
+        assert model_a.pending_requests == 0
 
     @pytest.mark.asyncio
     async def test_complete_request_starts_idle_timer(self, tmp_path):
@@ -296,7 +297,7 @@ class TestIdleTimer:
         await router.register_routes()
 
         model_a = router._models["model_a"]
-        model_a.pending_request = False
+        model_a.pending_requests = 0
 
         await router._complete_request("model_a")
         assert "model_a" in router._idle_timers
@@ -349,5 +350,40 @@ class TestIdleTimer:
         # (In this test, instance isn't actually started, but the logic path is exercised)
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+class TestPreemptionCooldown:
+    @pytest.mark.asyncio
+    async def test_preempted_instance_returns_429_within_cooldown(self, tmp_path):
+        presets = tmp_path / "presets.ini"
+        presets.write_text(
+            "[model_a]\npriority = 1\nmodel = /models/model_a.gguf\n\n[model_b]\npriority = 2\nmodel = /models/model_b.gguf\n"
+        )
+        config = Config(port=0, ini_path=str(presets), work_dir=str(tmp_path), debug=False)
+        router = ProxyRouter(config)
+        await router.register_routes()
+
+        inst = router._instances["model_a"]
+        inst.running = True
+        inst.healthy = True
+        inst.preempted_at = time.time()
+
+        from unittest.mock import AsyncMock, MagicMock
+
+        req = MagicMock()
+        req.match_info = {'model': 'model_a'}
+        req.headers = {}
+        req.method = 'POST'
+        req.path = '/chat/completions/model_a'
+        req.read = AsyncMock(return_value=b'{"model": "model_a"}')
+        req.query_string = ''
+        req.query = {}
+        req.version = (1, 1)
+        req.content_type = None
+        req.content = None
+        req.transport = None
+        req.app = router._app
+        req._cached = None
+
+        resp = await router.forward_request(req)
+        assert resp.status == 429
+        data = json.loads(resp.text)
+        assert data["error"] == "server busy"

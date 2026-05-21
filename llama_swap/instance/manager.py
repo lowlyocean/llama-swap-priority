@@ -4,6 +4,7 @@ import asyncio
 import os
 import re
 import subprocess
+import time
 from configparser import ConfigParser
 from dataclasses import dataclass, field
 from typing import Optional
@@ -18,6 +19,9 @@ def _clean_ini(ini_path: str) -> str:
     return content
 
 
+PREEMPTION_COOLDOWN_SECONDS = 2
+
+
 @dataclass
 class InstanceState:
     config: Optional[ModelConfig] = None
@@ -26,6 +30,7 @@ class InstanceState:
     healthy: bool = False
     running: bool = False
     current_priority: int = 0
+    preempted_at: float | None = None
 
 
 def filter_section_presets(ini_dir: str, section_name: str) -> str:

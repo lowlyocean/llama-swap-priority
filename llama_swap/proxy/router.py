@@ -3,6 +3,7 @@
 import asyncio
 import json
 import signal
+import time
 
 from aiohttp import ClientSession, web
 
@@ -142,7 +143,7 @@ class ProxyRouter:
         if not model_cfg or model_cfg.sleep_idle_seconds <= 0:
             return
         # Don't start if there's a pending request
-        if model_cfg.pending_request:
+        if model_cfg.pending_requests > 0:
             return
 
         async def _idle_timeout() -> None:
@@ -173,7 +174,9 @@ class ProxyRouter:
         """Mark a request as completed and start the idle timer if appropriate."""
         model_cfg = self._models.get(model)
         if model_cfg:
-            model_cfg.pending_request = False
+            model_cfg.pending_requests -= 1
+            if model_cfg.pending_requests < 0:
+                model_cfg.pending_requests = 0
         # Start the idle timer — will only fire if no other requests are pending
         if model and model in self._models:
             await self._start_idle_timer(model)
@@ -200,7 +203,7 @@ class ProxyRouter:
 
         # Track which models have pending requests (idle timer should not fire)
         if model and model in self._models:
-            self._models[model].pending_request = True
+            self._models[model].pending_requests += 1
 
         if model not in self._models:
             print(f"[DEBUG] Unknown model: {model}")
@@ -228,6 +231,7 @@ class ProxyRouter:
                 if inst:
                     inst.running = False
                     inst.healthy = False
+                    inst.preempted_at = time.time()
                 highest = self._get_highest_instance_priority()
                 if new_priority > highest:
                     to_terminate = self._find_instance_to_terminate(new_priority)
@@ -247,6 +251,15 @@ class ProxyRouter:
                 )
 
         inst = self._instances.get(model)
+        if inst and inst.preempted_at is not None:
+            elapsed = time.time() - inst.preempted_at
+            if elapsed < 2:
+                print(f"[DEBUG] Instance was preempted {elapsed:.1f}s ago, returning 429")
+                return web.json_response(
+                    {"error": "server busy", "error_code": "try_again_later", "retry_after": 5},
+                    status=429,
+                )
+
         if not inst or not inst.running:
             print(f"[DEBUG] Starting instance for model={model}")
             await start_instance(model_config, debug=self.config.debug)
@@ -254,6 +267,7 @@ class ProxyRouter:
             if inst:
                 inst.running = True
                 inst.healthy = True
+                inst.preempted_at = None
 
         inst = self._instances.get(model)
         if inst:

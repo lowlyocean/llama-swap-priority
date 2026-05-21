@@ -28,7 +28,7 @@ class ModelConfig:
     options: dict = field(default_factory=dict)
     current_priority: int = 0
     sleep_idle_seconds: int = 0
-    pending_request: bool = False
+    pending_requests: int = 0
 
 
 class ModelRegistry:
