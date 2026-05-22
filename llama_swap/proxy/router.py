@@ -5,6 +5,7 @@ import json
 import signal
 import time
 
+import aiohttp
 from aiohttp import ClientSession, web
 
 from llama_swap.instance.manager import (
@@ -285,11 +286,35 @@ class ProxyRouter:
         }
 
         assert self._client is not None
-        resp = await self._client.post(
-            f"{backend_host}{path}",
-            headers=headers,
-            data=body,
-        )
+        try:
+            resp = await self._client.post(
+                f"{backend_host}{path}",
+                headers=headers,
+                data=body,
+            )
+        except asyncio.CancelledError:
+            raise
+        except asyncio.TimeoutError:
+            print(f"[DEBUG] Backend timeout for model={model}")
+            await self._complete_request(model)
+            return web.json_response(
+                {"error": "backend timeout"},
+                status=504,
+            )
+        except aiohttp.ServerDisconnectedError:
+            print(f"[DEBUG] Backend disconnected for model={model}")
+            await self._complete_request(model)
+            return web.json_response(
+                {"error": "backend disconnected"},
+                status=503,
+            )
+        except Exception as e:
+            print(f"[DEBUG] Backend error: {e}")
+            await self._complete_request(model)
+            return web.json_response(
+                {"error": str(e)},
+                status=502,
+            )
 
         print(f"[DEBUG] Backend response status: {resp.status}")
 
@@ -316,6 +341,8 @@ class ProxyRouter:
                 pass
             except asyncio.TimeoutError:
                 pass
+            except aiohttp.ServerDisconnectedError:
+                print(f"[DEBUG] Backend disconnected during SSE stream for model={model}")
             except Exception:
                 pass
             finally:
@@ -333,7 +360,7 @@ class ProxyRouter:
             filtered_headers = {
                 k: v
                 for k, v in resp.headers.items()
-                if k.lower() not in ("transfer-encoding", "connection")
+                if k.lower() not in ("transfer-encoding", "connection", "content-type")
             }
             await self._complete_request(model)
             return web.json_response(data, status=resp.status, headers=filtered_headers)
