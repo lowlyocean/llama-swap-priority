@@ -104,17 +104,14 @@ async def _start_docker_container(section_name: str, port: int, ini_path: str, d
     except (subprocess.CalledProcessError, Exception):
         pass
 
-    env_file = os.environ.get("ENV_FILE", "./.env")
-
     cmd = [
         "docker", "run",
         "--name", container_name,
         "--network", "host",
         "--gpus", "all",
-        "--env-file", "./.env",
+        *[item for key in os.environ.keys() for item in ("-e", key)],
         "--restart", "unless-stopped",
         "-v", f"""{os.environ.get("MODELS_PATH", "./models/")}:/app/models/:ro""",
-        "-v", f"{env_file}:/app/.env:ro",
         "--mount", f"type=bind,source={ini_path},target=/app/presets.ini,readonly",
         "--entrypoint", "./llama-server",
         os.environ.get("SERVER_IMAGE", "local/llama.cpp:full-cuda"),
@@ -127,7 +124,6 @@ async def _start_docker_container(section_name: str, port: int, ini_path: str, d
 
     stdout = subprocess.DEVNULL if not debug else None
     stderr = subprocess.DEVNULL if not debug else subprocess.STDOUT
-
     proc = subprocess.Popen(cmd, stdout=stdout, stderr=stderr)
     return section_name
 
