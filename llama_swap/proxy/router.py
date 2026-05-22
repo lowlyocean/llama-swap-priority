@@ -365,6 +365,30 @@ class ProxyRouter:
             await self._complete_request(model)
             return web.json_response(data, status=resp.status, headers=filtered_headers)
 
+    async def handle_metrics(self, request: web.Request) -> web.Response:
+        """Proxy /metrics to the first healthy running instance, forwarding query params."""
+        from urllib.parse import quote, urlencode
+
+        query = str(request.query_string) if request.query_string else ""
+        backend_path = f"/metrics?{query}" if query else "/metrics"
+
+        for inst in self._instances.values():
+            if inst.healthy and inst.running:
+                backend_url = f"http://127.0.0.1:{inst.port}"
+                try:
+                    assert self._client is not None
+                    async with self._client.get(f"{backend_url}{backend_path}") as resp:
+                        data = await resp.text()
+                        return web.Response(
+                            text=data,
+                            status=resp.status,
+                            content_type="text/plain; version=0.0.0",
+                        )
+                except Exception:
+                    continue
+
+        return web.json_response({"error": "no running instance"}, status=503)
+
     async def handle_model_list(self, request: web.Request) -> web.Response:
         path = request.path
 
@@ -437,6 +461,10 @@ class ProxyRouter:
         router.add_route("GET", "/v1/props/{model}", self.handle_model_list)
         router.add_route("GET", "/props", self.handle_model_list)
         router.add_route("GET", "/props/{model}", self.handle_model_list)
+
+        # GET routes — metrics
+        router.add_route("GET", "/metrics", self.handle_metrics)
+        router.add_route("GET", "/v1/metrics", self.handle_metrics)
 
         self._client = ClientSession()
 
