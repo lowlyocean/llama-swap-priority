@@ -91,7 +91,8 @@ async def _start_docker_container(section_name: str, port: int, ini_path: str, d
     safe = section_name.replace(":", "-").replace("/", "-").replace(" ", "-")
     container_name = f"llama_server_{safe}"
 
-    print(f"[DEBUG] Stopping existing container: {container_name}")
+    if debug:
+        print(f"[DEBUG] Stopping existing container: {container_name}")
 
     try:
         await asyncio.to_thread(
@@ -120,7 +121,8 @@ async def _start_docker_container(section_name: str, port: int, ini_path: str, d
         "--port", str(port),
     ]
 
-    print(f"[DEBUG] Running docker command: {' '.join(cmd)}")
+    if debug:
+        print(f"[DEBUG] Running docker command: {' '.join(cmd)}")
 
     stdout = subprocess.DEVNULL if not debug else None
     stderr = subprocess.DEVNULL if not debug else subprocess.STDOUT
@@ -137,7 +139,8 @@ async def start_instance(
     Kills any existing instance for the same section_name first to ensure
     no lingering instances. GPU resources are freed immediately.
     """
-    print(f"[DEBUG] start_instance: model={model_config.section_name}, port={model_config.port}")
+    if debug:
+        print(f"[DEBUG] start_instance: model={model_config.section_name}, port={model_config.port}")
 
     section_name = model_config.section_name
     safe = section_name.replace(":", "-").replace("/", "-").replace(" ", "-")
@@ -147,7 +150,8 @@ async def start_instance(
     existing = _instances.get(section_name)
     if existing and existing.process:
         try:
-            print(f"[DEBUG] Removing existing container: {container_name}")
+            if debug:
+                print(f"[DEBUG] Removing existing container: {container_name}")
             await asyncio.to_thread(
                 subprocess.run,
                 ["docker", "rm", "-f", container_name],
@@ -159,7 +163,8 @@ async def start_instance(
             pass
 
     filtered_ini = filter_section_presets(model_config.ini_dir, section_name)
-    print(f"[DEBUG] Filtered presets: {filtered_ini}")
+    if debug:
+        print(f"[DEBUG] Filtered presets: {filtered_ini}")
 
     await _start_docker_container(section_name, model_config.port, filtered_ini, debug)
 
@@ -178,13 +183,15 @@ async def start_instance(
 
 async def stop_instance(model_name: str, debug: bool = False) -> None:
     """Stop and remove an instance. Immediately frees GPU resources."""
-    print(f"[DEBUG] stop_instance: model={model_name}")
+    if debug:
+        print(f"[DEBUG] stop_instance: model={model_name}")
     safe = model_name.replace(":", "-").replace("/", "-").replace(" ", "-")
     container_name = f"llama_server_{safe}"
     inst = _instances.pop(model_name, None)
     if inst:
         try:
-            print(f"[DEBUG] Removing container: {container_name}")
+            if debug:
+                print(f"[DEBUG] Removing container: {container_name}")
             await asyncio.to_thread(
                 subprocess.run,
                 ["docker", "rm", "-f", container_name],
@@ -192,9 +199,11 @@ async def stop_instance(model_name: str, debug: bool = False) -> None:
                 check=True,
                 timeout=10,
             )
-            print(f"[DEBUG] Container removed: {container_name}")
+            if debug:
+                print(f"[DEBUG] Container removed: {container_name}")
         except (subprocess.CalledProcessError, Exception) as e:
-            print(f"[DEBUG] Failed to remove container {container_name}: {e}")
+            if debug:
+                print(f"[DEBUG] Failed to remove container {container_name}: {e}")
 
 
 def get_health_url(port: int) -> str:

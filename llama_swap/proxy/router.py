@@ -153,7 +153,8 @@ class ProxyRouter:
                 if model in self._idle_fired:
                     return
                 self._idle_fired.add(model)
-                print(f"[DEBUG] Idle timeout reached for model={model}")
+                if self.config.debug:
+                    print(f"[DEBUG] Idle timeout reached for model={model}")
                 await stop_instance(model, debug=self.config.debug)
                 inst = self._instances.get(model)
                 if inst:
@@ -196,7 +197,8 @@ class ProxyRouter:
                 model = None
 
         if self.config.debug:
-            print(f"[DEBUG] Incoming request: path={request.path}, model={model}")
+            if self.config.debug:
+                print(f"[DEBUG] Incoming request: path={request.path}, model={model}")
 
         # Cancel any pending idle timer for this model (reset the clock)
         if model and model in self._models:
@@ -207,7 +209,8 @@ class ProxyRouter:
             self._models[model].pending_requests += 1
 
         if model not in self._models:
-            print(f"[DEBUG] Unknown model: {model}")
+            if self.config.debug:
+                print(f"[DEBUG] Unknown model: {model}")
             return web.json_response(
                 {"error": f"unknown model: {model}"}, status=404
             )
@@ -215,18 +218,22 @@ class ProxyRouter:
         model_config = self._models[model]
         new_priority = model_config.priority
 
-        print(f"[DEBUG] Routing: model={model}, priority={new_priority}")
+        if self.config.debug:
+            print(f"[DEBUG] Routing: model={model}, priority={new_priority}")
 
         # Preemption logic
         highest = self._get_highest_instance_priority()
 
-        print(f"[DEBUG] Highest running priority: {highest}")
+        if self.config.debug:
+            print(f"[DEBUG] Highest running priority: {highest}")
 
         if new_priority > highest:
-            print(f"[DEBUG] Preemption: new priority {new_priority} > highest {highest}")
+            if self.config.debug:
+                print(f"[DEBUG] Preemption: new priority {new_priority} > highest {highest}")
             to_terminate = self._find_instance_to_terminate(new_priority)
             while to_terminate:
-                print(f"[DEBUG] Terminating instance: {to_terminate}")
+                if self.config.debug:
+                    print(f"[DEBUG] Terminating instance: {to_terminate}")
                 await stop_instance(to_terminate, debug=self.config.debug)
                 inst = self._instances.get(to_terminate)
                 if inst:
@@ -241,7 +248,8 @@ class ProxyRouter:
         elif new_priority <= highest:
             running_inst = self._instances.get(model)
             if not (running_inst and running_inst.running):
-                print(f"[DEBUG] No free instance, returning 429")
+                if self.config.debug:
+                    print(f"[DEBUG] No free instance, returning 429")
                 return web.json_response(
                     {
                         "error": "server busy",
@@ -255,14 +263,16 @@ class ProxyRouter:
         if inst and inst.preempted_at is not None:
             elapsed = time.time() - inst.preempted_at
             if elapsed < 2:
-                print(f"[DEBUG] Instance was preempted {elapsed:.1f}s ago, returning 429")
+                if self.config.debug:
+                    print(f"[DEBUG] Instance was preempted {elapsed:.1f}s ago, returning 429")
                 return web.json_response(
                     {"error": "server busy", "error_code": "try_again_later", "retry_after": 5},
                     status=429,
                 )
 
         if not inst or not inst.running:
-            print(f"[DEBUG] Starting instance for model={model}")
+            if self.config.debug:
+                print(f"[DEBUG] Starting instance for model={model}")
             await start_instance(model_config, debug=self.config.debug)
             inst = self._instances.get(model)
             if inst:
@@ -276,7 +286,8 @@ class ProxyRouter:
         else:
             backend_host = "http://127.0.0.1:{port}".format(port=model_config.port)
 
-        print(f"[DEBUG] Forwarding to backend: {backend_host}{request.path}")
+        if self.config.debug:
+            print(f"[DEBUG] Forwarding to backend: {backend_host}{request.path}")
 
         path = request.path
         headers = {
@@ -295,28 +306,32 @@ class ProxyRouter:
         except asyncio.CancelledError:
             raise
         except asyncio.TimeoutError:
-            print(f"[DEBUG] Backend timeout for model={model}")
+            if self.config.debug:
+                print(f"[DEBUG] Backend timeout for model={model}")
             await self._complete_request(model)
             return web.json_response(
                 {"error": "backend timeout"},
                 status=504,
             )
         except aiohttp.ServerDisconnectedError:
-            print(f"[DEBUG] Backend disconnected for model={model}")
+            if self.config.debug:
+                print(f"[DEBUG] Backend disconnected for model={model}")
             await self._complete_request(model)
             return web.json_response(
                 {"error": "backend disconnected"},
                 status=503,
             )
         except Exception as e:
-            print(f"[DEBUG] Backend error: {e}")
+            if self.config.debug:
+                print(f"[DEBUG] Backend error: {e}")
             await self._complete_request(model)
             return web.json_response(
                 {"error": str(e)},
                 status=502,
             )
 
-        print(f"[DEBUG] Backend response status: {resp.status}")
+        if self.config.debug:
+            print(f"[DEBUG] Backend response status: {resp.status}")
 
         # Stream SSE or return JSON depending on content type
         content_type = resp.content_type or ""
@@ -342,7 +357,8 @@ class ProxyRouter:
             except asyncio.TimeoutError:
                 pass
             except aiohttp.ServerDisconnectedError:
-                print(f"[DEBUG] Backend disconnected during SSE stream for model={model}")
+                if self.config.debug:
+                    print(f"[DEBUG] Backend disconnected during SSE stream for model={model}")
             except Exception:
                 pass
             finally:
@@ -356,7 +372,8 @@ class ProxyRouter:
                 data = await resp.read()
                 data = {"error": data.decode()} if isinstance(data, bytes) else data
 
-            print(f"[DEBUG] Returning response status: {resp.status}")
+            if self.config.debug:
+                print(f"[DEBUG] Returning response status: {resp.status}")
             filtered_headers = {
                 k: v
                 for k, v in resp.headers.items()
