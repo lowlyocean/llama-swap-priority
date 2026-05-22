@@ -38,10 +38,13 @@ asyncio.run(router.run())
 ### Preemption
 When a request arrives with priority higher than all running instances, the proxy terminates lower-priority instances before routing. When priority is equal or lower and no free instance exists, returns HTTP 429 with `retry_after`.
 
+### Idle shutdown
+`sleep-idle-seconds` from `presets.ini` starts a timer when a model has no pending requests. After the timeout elapses, the instance is stopped to free GPU memory. The timer only fires when no requests are pending and resets on each new request. Non-interactive endpoints (`/v1/models`, `/v1/props`, `/v1/metrics`) do not affect idle timers.
+
 ### Instance lifecycle
-- `start_instance(model_config)` kills any existing instance for the same section, then launches `llama-server` with a filtered presets file (only `[*]` + target section, stripped of `priority` fields)
+- `start_instance(model_config)` kills any existing instance for the same section, then launches `llama-server` with a filtered presets file (only `[*]` + target section, stripped of `priority` and `sleep-idle-seconds` fields)
 - `stop_instance(name)` kills the process via `proc.kill()` + `asyncio.to_thread(proc.wait)`, no blocking sleep
-- Health check runs every 5s, pings `{host}:{port}/health`, updates `inst.healthy`
+- Health check runs every 5s, pings `{host}:{port}/props` for `is_sleeping` boolean, updates `inst.healthy`
 
 ### SSE streaming
 `forward_request()` checks `resp.content_type` — if `text/event-stream`, streams chunks via `web.StreamResponse`; otherwise returns JSON. Catches `asyncio.CancelledError` and `asyncio.TimeoutError`.
@@ -60,10 +63,15 @@ When a request arrives with priority higher than all running instances, the prox
 ```ini
 [model_name]
 priority = 1
+sleep-idle-seconds = 300
 model = /path/to/model.gguf
 ```
 
-Sections with no `priority` field are skipped by `ModelRegistry`. The `[*]` section provides common defaults merged into each model's filtered config.
+- `priority` (required) — integer, higher = higher priority; sections without this field are skipped
+- `sleep-idle-seconds` (optional) — seconds of inactivity before instance stops; `0` disables it
+- Sections with no `priority` field are skipped by `ModelRegistry`
+- The `[*]` section provides common defaults merged into each model's filtered config
+- Proxy-only fields (`priority`, `sleep-idle-seconds`) are stripped from filtered presets passed to llama-server
 
 ## Tests
 
@@ -77,4 +85,4 @@ Sections with no `priority` field are skipped by `ModelRegistry`. The `[*]` sect
 docker compose -f docker-compose.yml up
 ```
 
-Builds from `python:3.12-slim`, copies `llama_swap/`, installs the package, runs `python -m llama_swap`. Mounts `presets.ini` into the container.
+Builds from `python:3.12-slim`, copies `llama_swap/`, installs the package, runs `python -m llama_swap`. Mounts `presets.ini` and model files into the container. Uses `${ENV_FILE:-./stack.env}` for env vars. GPU passthrough via nvidia runtime.

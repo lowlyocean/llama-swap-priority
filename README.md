@@ -1,138 +1,163 @@
 # llama-swap-priority
 
-A priority-based HTTP proxy/router that sits in front of multiple `llama-server` instances and routes requests to the appropriate backend based on model name and priority configuration.
+A drop-in replacement for llama.cpp's built-in router that adds **priority-based preemption** and **idle instance shutdown** on top of the existing `presets.ini` format.
 
-## Overview
+## What makes this different
 
-When you have multiple `llama-server` instances serving different models (possibly with different hardware priorities), this proxy provides:
+| Feature | llama.cpp router | llama-swap-priority |
+|---------|-----------------|---------------------|
+| Priority-based preemption | No | Yes — higher-priority requests preempt lower-priority instances |
+| Automatic idle shutdown | No | Yes — instances stop after `sleep-idle-seconds` of inactivity, freeing GPU |
+| Works with existing presets.ini | N/A | Yes — just add `priority` and optionally `sleep-idle-seconds` fields |
+| SSE streaming passthrough | Yes | Yes |
+| Docker support | No | Yes — GPU passthrough built in |
 
-- A single entry point (OpenAI-compatible API) for clients
-- Automatic routing of requests to the correct backend instance based on the `model` field
-- SSE (server-sent events) streaming passthrough for chat completions
-- Model list discovery via `/v1/models`
+**In short:** If you already use llama.cpp's router mode with a `presets.ini`, you can switch to this proxy by adding two fields to your config. Higher-priority models automatically preempt lower ones, and idle instances shut down to reclaim GPU memory.
 
-## Architecture
+## Prerequisites
 
-```
-Client → llama-swap-priority (proxy) → llama-server instances (backends)
-```
+- **Docker** installed and running
+- **NVIDIA GPU** with CUDA drivers and the `nvidia-container-toolkit` installed
+- An existing **`presets.ini`** file from your llama.cpp router setup
 
-The proxy listens for incoming HTTP requests, determines which backend model should handle the request, and forwards the request accordingly. Streaming responses are streamed back to the client in real-time.
+## Setup
 
-## Installation
+### 1. Clone and prepare
 
 ```bash
-# Clone or copy the project
+git clone <repo-url>
 cd llama-swap-priority
-
-# Create a virtual environment
-python3 -m venv .venv
-
-# Activate it
-source .venv/bin/activate
-
-# Install dependencies
-pip install -e .
-
-# Or install directly
-pip install aiohttp
 ```
 
-## Configuration
+### 2. Configure your presets.ini
 
-Create a `presets.ini` file in the project root (or set `work_dir` in config). The INI file uses section headers for each model, with a `priority` field:
+Copy your existing `presets.ini` into the project root. Add a `priority` field (integer) to each model section. Optionally add `sleep-idle-seconds` to control when idle instances shut down:
 
 ```ini
+[*]
+batch = 32
+
 [llama3-8b]
 priority = 1
-model = /path/to/model.gguf
+sleep-idle-seconds = 300
+model = /models/llama3-8b.gguf
 
 [llama3-70b]
 priority = 2
-model = /path/to/other-model.gguf
+sleep-idle-seconds = 600
+model = /models/llama3-70b.gguf
 ```
 
-Each section maps to one model. The `priority` field (integer) determines load-balancing weight — higher priority models receive proportionally more traffic.
+**How priority works:**
+- Higher number = higher priority
+- When a request arrives for a higher-priority model than any running instance, the proxy terminates the lower-priority instance(s) before routing
+- When priority is equal or lower and no free instance exists, returns HTTP 429 (server busy)
 
-### Config defaults
+**How `sleep-idle-seconds` works:**
+- Set to `0` to disable (instance stays running indefinitely)
+- Set to a number of seconds — the instance stops after that many seconds of no requests
+- Only fires when no other requests are pending for the model
+- Non-interactive endpoints (`/v1/models`, `/v1/props`, `/v1/metrics`) do not affect idle timers
 
-Override defaults by passing them to `Config`:
+### 3. Configure environment
 
-| Setting       | Default     | Description                        |
-|---------------|-------------|-----------------------------------|
-| `ini_path`    | `presets.ini` | Path to the model config INI file |
-| `host`        | `0.0.0.0`   | Bind address                      |
-| `port`        | `11434`     | Proxy listen port                 |
-| `start_port`  | `12000`     | First port for backend instances  |
-| `work_dir`    | `.`         | Directory for the INI file        |
-| `binary`      | `llama-server` | Path to llama-server binary     |
-
-## Usage
-
-### From command line
+Create a `.env` file in the project root. This file controls GPU passthrough and paths:
 
 ```bash
-python3 -m llama_swap
+# GPU passthrough
+NVIDIA_VISIBLE_DEVICES=all
+CUDA_VISIBLE_DEVICES=0,1
+
+# Paths to your presets.ini and model files
+PRESETS_PATH=/path/to/your/presets.ini
+MODELS_PATH=/path/to/your/models/
+
+# Docker image for llama.cpp backend
+SERVER_IMAGE=local/llama.cpp:full-cuda
+ENV_FILE=./.env
 ```
 
-### As a module
+Key fields:
+- `PRESETS_PATH` — absolute path to your `presets.ini` file (mounted read-only into the container)
+- `MODELS_PATH` — absolute path to where your model files are stored (mounted read-only)
+- `SERVER_IMAGE` — the Docker image that runs the actual llama.cpp server (adjust for your setup)
+- `ENV_FILE` — path to the `.env` file (defaults to `./` if not set)
 
-```python
-import asyncio
-from llama_swap.config import Config
-from llama_swap.proxy.router import ProxyRouter
+### 4. Run
 
-config = Config(port=11434)
-router = ProxyRouter(config)
-asyncio.run(router.run())
+```bash
+docker compose -f docker-compose.yml up
 ```
 
-## API
+The proxy listens on port **11434** (Ollama's default port).
 
-The proxy exposes an OpenAI-compatible API:
+### 5. Verify
 
 ```bash
 # List available models
 curl http://localhost:11434/v1/models
 
-# Chat completions (streaming)
+# Chat completion (streaming)
 curl http://localhost:11434/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model": "llama3-8b", "messages": [{"role": "user", "content": "Hello"}]}'
-
-# Non-streaming completions
-curl http://localhost:11434/v1/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model": "llama3-8b", "prompt": "Hello"}'
 ```
 
-## Project Structure
+Any OpenAI-compatible client can now point to `http://localhost:11434/v1/`.
+
+## How it works at a glance
 
 ```
-llama-swap-priority/
-├── llama_swap/
-│   ├── __init__.py
-│   ├── config.py          # Config, ModelConfig, ModelRegistry
-│   ├── main.py            # Entry point
-│   ├── engine/
-│   │   ├── __init__.py
-│   │   ├── models.py      # URL helpers, options loader
-│   │   └── request_context.py  # Request state
-│   ├── instance/
-│   │   ├── __init__.py
-│   │   └── manager.py     # Start/stop llama-server instances
-│   ├── preset/
-│   │   ├── __init__.py
-│   │   └── ini_parser.py  # Presets.ini reader
-│   └── proxy/
-│       ├── __init__.py
-│       └── router.py      # ProxyRouter (aiohttp server)
-├── pyproject.toml
-└── README.md
+Client → Proxy (port 11434) → Docker containers (llama-server backends)
 ```
+
+The proxy routes requests to backend containers and manages their lifecycle based on priority and idle timeouts.
+
+### Non-interactive endpoints
+
+These endpoints do **not** affect idle timers or preemption logic:
+
+- `GET /v1/models` — List available models (falls back to backend if all unhealthy)
+- `GET /v1/props` — Proxy to the first running instance
+- `GET /v1/metrics` — Proxy to the first running instance, forwards query params
+
+### Interactive endpoints
+
+These trigger preemption, idle timers, and instance lifecycle management:
+
+- `POST /v1/chat/completions` — Chat completions (streaming)
+- `POST /v1/completions` — Legacy completions
+- `POST /v1/embeddings` — Embeddings
+
+## How priority preemption works
+
+When a request arrives for a higher-priority model than any running instance, the proxy terminates the lower-priority instance(s) before routing. If priority is equal or lower and no free instance exists, it returns HTTP 429 (server busy). A 2-second cooldown prevents re-accepting requests immediately after preemption.
+
+## Running locally (without Docker)
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+python -m llama_swap
+```
+
+This runs the proxy directly on your machine. Docker is still required for the llama-server backend containers — the proxy will spawn containers via the Docker API. You must have the `nvidia-container-toolkit` and a `presets.ini` in place.
+
+## API endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/v1/models` | List available models |
+| POST | `/v1/chat/completions` | Chat completions (streaming) |
+| POST | `/v1/completions` | Legacy completions |
+| POST | `/v1/embeddings` | Embeddings |
+
+All paths also support the `/{model}` suffix variant.
 
 ## Requirements
 
-- Python 3.12+
-- `aiohttp` (pip installable)
-- `llama-server` binary available on `$PATH`
+- Python 3.12+ (for local development)
+- Docker + Docker Compose (for production)
+- NVIDIA GPU with CUDA support (for backends)
+- `aiohttp` Python package
