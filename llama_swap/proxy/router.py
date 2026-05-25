@@ -10,6 +10,7 @@ from aiohttp import ClientSession, web
 
 from llama_swap.instance.manager import (
     InstanceState,
+    filter_all_presets,
     start_instance,
     stop_instance,
     _instances,
@@ -35,6 +36,7 @@ class ProxyRouter:
         self._stop_event: asyncio.Event | None = None
         self._idle_timers: dict[str, asyncio.Task[None] | None] = {}
         self._idle_fired: set[str] = set()
+        self._models_response: dict | None = None
 
         # Register models from registry
         port = config.start_port
@@ -71,6 +73,32 @@ class ProxyRouter:
             if pri > max_priority:
                 max_priority = pri
         return max_priority
+
+    async def _bootstrap_models(self) -> None:
+        """Start a single bootstrap instance, fetch /models, then shut it down."""
+        bootstrap_port = 20000
+        filtered_ini = filter_all_presets(self.config.work_dir)
+
+        await start_instance(
+            ModelConfig(
+                section_name="bootstrap",
+                port=bootstrap_port,
+                ini_dir=self.config.work_dir,
+                priority=0,
+            ),
+            debug=False,
+            filtered_ini=filtered_ini,
+        )
+        await asyncio.sleep(5)
+
+        assert self._client is not None
+        async with self._client.get(
+            f"http://127.0.0.1:{bootstrap_port}/models",
+        ) as resp:
+            data = await resp.json()
+            self._models_response = data
+
+        await stop_instance("bootstrap")
 
     def _find_instance_to_terminate(self, new_priority: int) -> str | None:
         """Find a running instance with priority lower than the new request's priority."""
@@ -211,6 +239,7 @@ class ProxyRouter:
         if model not in self._models:
             if self.config.debug:
                 print(f"[DEBUG] Unknown model: {model}")
+            await self._complete_request(model)
             return web.json_response(
                 {"error": f"unknown model: {model}"}, status=404
             )
@@ -250,6 +279,7 @@ class ProxyRouter:
             if not (running_inst and running_inst.running):
                 if self.config.debug:
                     print(f"[DEBUG] No free instance, returning 429")
+                await self._complete_request(model)
                 return web.json_response(
                     {
                         "error": "server busy",
@@ -263,6 +293,7 @@ class ProxyRouter:
         if inst and inst.preempted_at is not None:
             elapsed = time.time() - inst.preempted_at
             if elapsed < 2:
+                await self._complete_request(model)
                 if self.config.debug:
                     print(f"[DEBUG] Instance was preempted {elapsed:.1f}s ago, returning 429")
                 return web.json_response(
@@ -407,44 +438,8 @@ class ProxyRouter:
         return web.json_response({"error": "no running instance"}, status=503)
 
     async def handle_model_list(self, request: web.Request) -> web.Response:
-        path = request.path
-
-        for inst in self._instances.values():
-            if inst.healthy:
-                backend_url = f"http://127.0.0.1:{inst.port}"
-                try:
-                    assert self._client is not None
-                    async with self._client.get(
-                        f"{backend_url}{path}",
-                        headers={
-                            k: v
-                            for k, v in request.headers.items()
-                            if k.lower() not in ("host", "connection", "content-length")
-                        },
-                    ) as resp:
-                        data = await resp.text()
-                        return web.Response(
-                            text=data,
-                            status=resp.status,
-                            content_type=resp.content_type,
-                        )
-                except Exception:
-                    continue
-
-        model_list = []
-        for model_cfg in self.registry.models:
-            model_list.append(
-                {
-                    "id": model_cfg.section_name,
-                    "object": "model",
-                    "created": 0,
-                    "owned_by": "llama-swap-priority",
-                }
-            )
-
-        return web.json_response(
-            {"object": "list", "data": model_list}
-        )
+        assert self._models_response is not None, "bootstrap did not complete"
+        return web.json_response(self._models_response)
 
     async def register_routes(self) -> None:
         if self._app is None:
@@ -483,8 +478,6 @@ class ProxyRouter:
         router.add_route("GET", "/metrics", self.handle_metrics)
         router.add_route("GET", "/v1/metrics", self.handle_metrics)
 
-        self._client = ClientSession()
-
     async def run(self) -> None:
         self._app = web.Application()
 
@@ -498,10 +491,15 @@ class ProxyRouter:
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, lambda s=sig: asyncio.ensure_future(_shutdown_handler(s)))
 
+        await self.register_routes()
+
+        self._client = ClientSession()
+
+        # Bootstrap: start a temporary instance to populate /v1/models, then shut it down
+        await self._bootstrap_models()
+
         # Start health check loop
         self._health_task = asyncio.create_task(self._health_check())
-
-        await self.register_routes()
 
         runner = web.AppRunner(self._app)
         await runner.setup()

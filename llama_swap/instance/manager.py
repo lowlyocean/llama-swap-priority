@@ -33,6 +33,57 @@ class InstanceState:
     preempted_at: float | None = None
 
 
+def filter_all_presets(ini_dir: str) -> str:
+    """Read presets.ini and write a temporary file with all model sections.
+
+    Strips proxy-only fields like 'priority' and 'sleep-idle-seconds' before
+    writing. Includes the [*] section if present.
+    """
+    ini_path = os.path.join(ini_dir, "presets.ini")
+    cleaned = _clean_ini(ini_path)
+    parser = ConfigParser()
+    parser.read_string(cleaned)
+    proxy_fields = {"priority", "sleep-idle-seconds"}
+
+    import tempfile
+    tmp = tempfile.NamedTemporaryFile(
+        prefix="llama-swap-bootstrap-",
+        suffix=".ini",
+        delete=False,
+        dir="/tmp",
+        mode="w",
+    )
+
+    # Write the [*] section if it exists
+    has_star = False
+    for key in parser:
+        if key == "*":
+            has_star = True
+            break
+    if has_star:
+        opts = dict(parser["*"])
+        opts = {k: v for k, v in opts.items() if k not in proxy_fields}
+        if opts:
+            tmp.write("[*]\n")
+            for k, v in opts.items():
+                tmp.write(f"{k} = {v}\n")
+            tmp.write("\n")
+
+    # Write all model sections
+    for section in parser.sections():
+        opts = dict(parser[section])
+        opts = {k: v for k, v in opts.items() if k not in proxy_fields}
+        if opts:
+            tmp.write(f"[{section}]\n")
+            for k, v in opts.items():
+                tmp.write(f"{k} = {v}\n")
+            tmp.write("\n")
+
+    tmp.flush()
+    tmp.close()
+    return tmp.name
+
+
 def filter_section_presets(ini_dir: str, section_name: str) -> str:
     """Read presets.ini and write a temporary file with only the [*] and target section.
 
@@ -133,6 +184,7 @@ async def _start_docker_container(section_name: str, port: int, ini_path: str, d
 async def start_instance(
     model_config: "ModelConfig",
     debug: bool = False,
+    filtered_ini: str | None = None,
 ) -> InstanceState:
     """Start a llama-server instance for the given model config.
 
@@ -162,11 +214,14 @@ async def start_instance(
         except (subprocess.CalledProcessError, Exception):
             pass
 
-    filtered_ini = filter_section_presets(model_config.ini_dir, section_name)
+    if filtered_ini:
+        ini_path = filtered_ini
+    else:
+        ini_path = filter_section_presets(model_config.ini_dir, section_name)
     if debug:
-        print(f"[DEBUG] Filtered presets: {filtered_ini}")
+        print(f"[DEBUG] Filtered presets: {ini_path}")
 
-    await _start_docker_container(section_name, model_config.port, filtered_ini, debug)
+    await _start_docker_container(section_name, model_config.port, ini_path, debug)
 
     await asyncio.sleep(0.5)
 

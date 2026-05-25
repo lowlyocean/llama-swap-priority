@@ -113,7 +113,6 @@ class TestInstanceManager:
     def test_get_health_url(self):
         assert get_health_url(12345) == "http://127.0.0.1:12345/health"
 
-
     @pytest.mark.asyncio
     async def test_models_list_fallback(self, tmp_path):
         presets = tmp_path / "presets.ini"
@@ -124,62 +123,12 @@ class TestInstanceManager:
         router = ProxyRouter(config)
         await router.register_routes()
 
+        # _models_response is None — should raise
         from aiohttp.test_utils import make_mocked_request
 
         req = make_mocked_request("GET", "/v1/models")
-        resp = await router.handle_model_list(req)
-        assert resp.status == 200
-        import json
-
-        data = json.loads(resp.text)
-        assert data["object"] == "list"
-        assert len(data["data"]) == 2
-        ids = [m["id"] for m in data["data"]]
-        assert "model_a" in ids
-        assert "model_b" in ids
-        for m in data["data"]:
-            assert m["object"] == "model"
-            assert m["owned_by"] == "llama-swap-priority"
-
-    @pytest.mark.asyncio
-    async def test_models_list_with_running_instance(self, tmp_path):
-        presets = tmp_path / "presets.ini"
-        presets.write_text(
-            "[model_a]\npriority = 1\nmodel = /models/model_a.gguf\n\n[model_b]\npriority = 2\nmodel = /models/model_b.gguf\n"
-        )
-        config = Config(port=0, ini_path=str(presets), work_dir=str(tmp_path))
-        router = ProxyRouter(config)
-        await router.register_routes()
-
-        from contextlib import asynccontextmanager
-        from unittest.mock import AsyncMock, MagicMock
-
-        mock_resp = AsyncMock()
-        mock_resp.text = AsyncMock(return_value="backend_models_response")
-        mock_resp.status = 200
-        mock_resp.content_type = "application/json"
-
-        @asynccontextmanager
-        async def mock_get(*args, **kwargs):
-            yield mock_resp
-
-        mock_process = MagicMock()
-        mock_process.returncode = None
-
-        mock_inst = MagicMock()
-        mock_inst.healthy = True
-        mock_inst.process = mock_process
-        mock_inst.port = 12000
-
-        router._client.get = mock_get
-        router._instances["model_a"] = mock_inst
-
-        from aiohttp.test_utils import make_mocked_request
-
-        req = make_mocked_request("GET", "/v1/models")
-        resp = await router.handle_model_list(req)
-        assert resp.status == 200
-        assert resp.text == "backend_models_response"
+        with pytest.raises(AssertionError, match="bootstrap did not complete"):
+            await router.handle_model_list(req)
 
 
 class TestIdleTimer:
@@ -366,14 +315,17 @@ class TestPreemptionCooldown:
         inst.healthy = True
         inst.preempted_at = time.time()
 
-        from unittest.mock import AsyncMock, MagicMock
+        from unittest.mock import MagicMock
 
         req = MagicMock()
         req.match_info = {'model': 'model_a'}
         req.headers = {}
         req.method = 'POST'
         req.path = '/chat/completions/model_a'
-        req.read = AsyncMock(return_value=b'{"model": "model_a"}')
+        async def mock_read():
+            return b'{"model": "model_a"}'
+
+        req.read = mock_read
         req.query_string = ''
         req.query = {}
         req.version = (1, 1)
