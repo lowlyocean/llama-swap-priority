@@ -76,10 +76,11 @@ class ProxyRouter:
         return max_priority
 
     async def _bootstrap_models(self) -> None:
-        """Start a single bootstrap instance, fetch /models and /props for each model, then shut it down."""
+        """Start a bootstrap instance, fetch /models, then for each model: start instance, fetch /props, cache, tear down."""
         bootstrap_port = 20000
         filtered_ini = filter_all_presets(self.config.work_dir)
 
+        # Start bootstrap instance and fetch /models
         await start_instance(
             ModelConfig(
                 section_name="bootstrap",
@@ -99,7 +100,22 @@ class ProxyRouter:
             data = await resp.json()
             self._models_response = data
 
+        # Tear down the bootstrap instance
+        await stop_instance("bootstrap")
+
+        # For each model: start instance, fetch /props, cache, tear down
         for model_cfg in self.registry.models:
+            await start_instance(
+                ModelConfig(
+                    section_name=model_cfg.section_name,
+                    port=bootstrap_port,
+                    ini_dir=self.config.work_dir,
+                    priority=0,
+                ),
+                debug=False,
+            )
+            await asyncio.sleep(5)
+
             try:
                 async with self._client.get(
                     f"http://127.0.0.1:{bootstrap_port}/props?model={model_cfg.section_name}",
@@ -109,7 +125,7 @@ class ProxyRouter:
             except Exception:
                 pass
 
-        await stop_instance("bootstrap")
+            await stop_instance(model_cfg.section_name)
 
     def _find_instance_to_terminate(self, new_priority: int) -> str | None:
         """Find a running instance with priority lower than the new request's priority."""
