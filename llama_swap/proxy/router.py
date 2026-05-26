@@ -37,6 +37,7 @@ class ProxyRouter:
         self._idle_timers: dict[str, asyncio.Task[None] | None] = {}
         self._idle_fired: set[str] = set()
         self._models_response: dict | None = None
+        self._props_cache: dict[str, dict] = {}
 
         # Register models from registry
         port = config.start_port
@@ -75,7 +76,7 @@ class ProxyRouter:
         return max_priority
 
     async def _bootstrap_models(self) -> None:
-        """Start a single bootstrap instance, fetch /models, then shut it down."""
+        """Start a single bootstrap instance, fetch /models and /props for each model, then shut it down."""
         bootstrap_port = 20000
         filtered_ini = filter_all_presets(self.config.work_dir)
 
@@ -97,6 +98,16 @@ class ProxyRouter:
         ) as resp:
             data = await resp.json()
             self._models_response = data
+
+        for model_cfg in self.registry.models:
+            try:
+                async with self._client.get(
+                    f"http://127.0.0.1:{bootstrap_port}/props?model={model_cfg.section_name}",
+                ) as resp:
+                    props_data = await resp.json()
+                    self._props_cache[model_cfg.section_name] = props_data
+            except Exception:
+                pass
 
         await stop_instance("bootstrap")
 
@@ -441,6 +452,14 @@ class ProxyRouter:
         assert self._models_response is not None, "bootstrap did not complete"
         return web.json_response(self._models_response)
 
+    async def handle_props(self, request: web.Request) -> web.Response:
+        assert self._props_cache is not None, "bootstrap did not complete"
+        model = request.query.get("model")
+        if model:
+            assert model in self._props_cache, f"props cache missing for {model}"
+            return web.json_response(self._props_cache[model])
+        return web.json_response({"models": list(self._props_cache.keys())})
+
     async def register_routes(self) -> None:
         if self._app is None:
             self._app = web.Application()
@@ -469,10 +488,10 @@ class ProxyRouter:
         router.add_route("POST", "/embeddings/{model}", self.forward_request)
 
         # GET routes — props
-        router.add_route("GET", "/v1/props", self.handle_model_list)
-        router.add_route("GET", "/v1/props/{model}", self.handle_model_list)
-        router.add_route("GET", "/props", self.handle_model_list)
-        router.add_route("GET", "/props/{model}", self.handle_model_list)
+        router.add_route("GET", "/v1/props", self.handle_props)
+        router.add_route("GET", "/v1/props/{model}", self.handle_props)
+        router.add_route("GET", "/props", self.handle_props)
+        router.add_route("GET", "/props/{model}", self.handle_props)
 
         # GET routes — metrics
         router.add_route("GET", "/metrics", self.handle_metrics)
