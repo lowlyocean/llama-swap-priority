@@ -19,6 +19,31 @@ from llama_swap.preset.ini_parser import read_preset
 from llama_swap.config import Config, ModelConfig, ModelRegistry
 
 
+async def _wait_for_http_ready(port: int, timeout: float = 60) -> bool:
+    """Poll /models endpoint with exponential backoff until the backend accepts HTTP connections.
+    
+    Returns True if the port is reachable via HTTP, False if timeout is reached.
+    """
+    delay = 0.5
+    start = time.time()
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"http://127.0.0.1:{port}/models",
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as resp:
+                    if resp.status == 200:
+                        return True
+        except Exception:
+            pass
+        elapsed = time.time() - start
+        if elapsed >= timeout:
+            return False
+        await asyncio.sleep(delay)
+        delay = min(delay * 2, 8)
+
+
 class ProxyRouter:
     """Routes requests to backend instances."""
 
@@ -178,8 +203,10 @@ class ProxyRouter:
                         try:
                             healthy = await self._check_instance_status(inst.port)
                             inst.healthy = healthy
-                            if healthy and not inst.running:
-                                inst.running = True
+                            if healthy:
+                                inst.loading = False
+                                if not inst.running:
+                                    inst.running = True
                         except Exception:
                             inst.healthy = False
                 await asyncio.sleep(5)
@@ -204,6 +231,12 @@ class ProxyRouter:
 
         async def _idle_timeout() -> None:
             try:
+                inst = self._instances.get(model)
+                if inst and inst.loading:
+                    inst2 = self._instances.get(model)
+                    while inst2 and inst2.loading:
+                        await asyncio.sleep(2)
+                        inst2 = self._instances.get(model)
                 await asyncio.sleep(model_cfg.sleep_idle_seconds)
                 if model in self._idle_fired:
                     return
@@ -334,9 +367,18 @@ class ProxyRouter:
             await start_instance(model_config, debug=self.config.debug)
             inst = self._instances.get(model)
             if inst:
-                inst.running = True
+                inst.loading = True
                 inst.healthy = True
                 inst.preempted_at = None
+                port = inst.port
+                if port:
+                    try:
+                        connected = await _wait_for_http_ready(port, timeout=60)
+                        if connected:
+                            inst.loading = False
+                            inst.running = True
+                    except Exception:
+                        pass
 
         inst = self._instances.get(model)
         if inst:
@@ -355,38 +397,55 @@ class ProxyRouter:
         }
 
         assert self._client is not None
-        try:
-            resp = await self._client.post(
-                f"{backend_host}{path}",
-                headers=headers,
-                data=body,
-            )
-        except asyncio.CancelledError:
-            raise
-        except asyncio.TimeoutError:
-            if self.config.debug:
-                print(f"[DEBUG] Backend timeout for model={model}")
-            await self._complete_request(model)
-            return web.json_response(
-                {"error": "backend timeout"},
-                status=504,
-            )
-        except aiohttp.ServerDisconnectedError:
-            if self.config.debug:
-                print(f"[DEBUG] Backend disconnected for model={model}")
-            await self._complete_request(model)
-            return web.json_response(
-                {"error": "backend disconnected"},
-                status=503,
-            )
-        except Exception as e:
-            if self.config.debug:
-                print(f"[DEBUG] Backend error: {e}")
-            await self._complete_request(model)
-            return web.json_response(
-                {"error": str(e)},
-                status=502,
-            )
+
+        # Retry once on connection error if instance is still loading (instance just started and may not be ready yet)
+        max_retries = 2 if inst and inst.loading else 1
+
+        for attempt in range(max_retries):
+            try:
+                resp = await self._client.post(
+                    f"{backend_host}{path}",
+                    headers=headers,
+                    data=body,
+                )
+                break
+            except asyncio.CancelledError:
+                raise
+            except asyncio.TimeoutError:
+                if self.config.debug:
+                    print(f"[DEBUG] Backend timeout for model={model} (attempt {attempt + 1}/{max_retries})")
+                await self._complete_request(model)
+                return web.json_response(
+                    {"error": "backend timeout"},
+                    status=504,
+                )
+            except aiohttp.ServerDisconnectedError:
+                if self.config.debug:
+                    print(f"[DEBUG] Backend disconnected for model={model} (attempt {attempt + 1}/{max_retries})")
+                await self._complete_request(model)
+                return web.json_response(
+                    {"error": "backend disconnected"},
+                    status=503,
+                )
+            except (aiohttp.ClientConnectionError, aiohttp.ClientConnectorError, ConnectionRefusedError) as e:
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(1)
+                    continue
+                if self.config.debug:
+                    print(f"[DEBUG] Backend connection error for model={model} (attempt {attempt + 1}/{max_retries})")
+                await self._complete_request(model)
+                return web.json_response(
+                    {"error": str(e)},
+                    status=502,
+                )
+            except Exception as e:
+                if self.config.debug:
+                    print(f"[DEBUG] Backend error: {e}")
+                await self._complete_request(model)
+                return web.json_response(
+                    {"error": str(e)},
+                    status=502,
+                )
 
         if self.config.debug:
             print(f"[DEBUG] Backend response status: {resp.status}")

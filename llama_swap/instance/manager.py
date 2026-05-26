@@ -29,6 +29,7 @@ class InstanceState:
     process: Optional[subprocess.Popen] = None
     healthy: bool = False
     running: bool = False
+    loading: bool = False
     current_priority: int = 0
     preempted_at: float | None = None
 
@@ -228,8 +229,8 @@ async def start_instance(
     state = InstanceState(
         config=model_config,
         port=model_config.port,
-        process=None,
         healthy=True,
+        loading=True,
         current_priority=model_config.priority,
     )
     _instances[section_name] = state
