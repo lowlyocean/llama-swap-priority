@@ -299,10 +299,15 @@ class ProxyRouter:
         if model not in self._models:
             if self.config.debug:
                 print(f"[DEBUG] Unknown model: {model}")
-            await self._complete_request(model)
             return web.json_response(
                 {"error": f"unknown model: {model}"}, status=404
             )
+
+        model_cfg = self._models.get(model)
+        if model_cfg:
+            model_cfg.pending_requests -= 1
+            if model_cfg.pending_requests < 0:
+                model_cfg.pending_requests = 0
 
         model_config = self._models[model]
         new_priority = model_config.priority
@@ -339,7 +344,11 @@ class ProxyRouter:
             if not (running_inst and running_inst.running):
                 if self.config.debug:
                     print(f"[DEBUG] No free instance, returning 429")
-                await self._complete_request(model)
+                model_cfg = self._models.get(model)
+                if model_cfg:
+                    model_cfg.pending_requests -= 1
+                    if model_cfg.pending_requests < 0:
+                        model_cfg.pending_requests = 0
                 return web.json_response(
                     {
                         "error": "server busy",
@@ -353,7 +362,11 @@ class ProxyRouter:
         if inst and inst.preempted_at is not None:
             elapsed = time.time() - inst.preempted_at
             if elapsed < 2:
-                await self._complete_request(model)
+                model_cfg = self._models.get(model)
+                if model_cfg:
+                    model_cfg.pending_requests -= 1
+                    if model_cfg.pending_requests < 0:
+                        model_cfg.pending_requests = 0
                 if self.config.debug:
                     print(f"[DEBUG] Instance was preempted {elapsed:.1f}s ago, returning 429")
                 return web.json_response(
