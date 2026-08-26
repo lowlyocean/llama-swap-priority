@@ -485,6 +485,7 @@ class ProxyRouter:
             except asyncio.CancelledError:
                 pass
             except asyncio.TimeoutError:
+                print(f"[TIMEOUT] SSE stream timed out (1200s) for model={model}")
                 pass
             except aiohttp.ServerDisconnectedError:
                 if self.config.debug:
@@ -600,7 +601,7 @@ class ProxyRouter:
 
         await self.register_routes()
 
-        self._client = ClientSession()
+        self._client = ClientSession(timeout=aiohttp.ClientTimeout(total=1200))
 
         # Bootstrap: start a temporary instance to populate /v1/models, then shut it down
         await self._bootstrap_models()
