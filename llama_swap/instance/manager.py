@@ -32,6 +32,7 @@ class InstanceState:
     loading: bool = False
     current_priority: int = 0
     preempted_at: float | None = None
+    default_running: bool = False
 
 
 def filter_all_presets(ini_dir: str) -> str:

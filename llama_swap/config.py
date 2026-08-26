@@ -50,7 +50,20 @@ class ModelRegistry:
 
     def _load_models(self) -> list[ModelConfig]:
         models = []
+        self.default_running_model: str | None = None
+        # First pass: collect all sections with priority
+        priority_sections = set()
         for section in self.parser.sections():
+            if section == "*":
+                continue
+            if self.parser.has_option(section, "priority"):
+                priority_sections.add(section)
+        # Second pass: load models and resolve default
+        for section in self.parser.sections():
+            if section == "*" and self.parser.has_option(section, "default-running-model"):
+                drm = self.parser.get(section, "default-running-model")
+                if drm in priority_sections:
+                    self.default_running_model = drm
             if not self.parser.has_option(section, "priority"):
                 continue
             priority = int(self.parser.get(section, "priority"))

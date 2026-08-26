@@ -63,6 +63,7 @@ class ProxyRouter:
         self._idle_fired: set[str] = set()
         self._models_response: dict | None = None
         self._props_cache: dict[str, dict] = {}
+        self._default_running_model: str | None = self.registry.default_running_model
 
         # Register models from registry
         port = config.start_port
@@ -228,6 +229,10 @@ class ProxyRouter:
         # Don't start if there's a pending request
         if model_cfg.pending_requests > 0:
             return
+        # Don't start idle timer for default-running model (idle timeout ignored)
+        inst = self._instances.get(model)
+        if inst and inst.default_running:
+            return
 
         async def _idle_timeout() -> None:
             try:
@@ -249,6 +254,31 @@ class ProxyRouter:
                     inst.running = False
                     inst.healthy = False
                 self._idle_timers[model] = None
+                # Check if this was the last running instance and we have a default model
+                if self._default_running_model:
+                    all_running = False
+                    for n, i in self._instances.items():
+                        if i.running:
+                            all_running = True
+                            break
+                    if not all_running:
+                        if self.config.debug:
+                            print(f"[DEBUG] All instances stopped, launching default model={self._default_running_model}")
+                        default_cfg = self._models[self._default_running_model]
+                        await start_instance(default_cfg)
+                        default_inst = self._instances[self._default_running_model]
+                        if default_inst:
+                            default_inst.default_running = True
+                            if default_inst.port:
+                                try:
+                                    connected = await _wait_for_http_ready(
+                                        default_inst.port, timeout=60
+                                    )
+                                    if connected:
+                                        default_inst.loading = False
+                                        default_inst.running = True
+                                except Exception:
+                                    pass
             except asyncio.CancelledError:
                 raise
             except asyncio.TimeoutError:
@@ -311,6 +341,32 @@ class ProxyRouter:
 
         model_config = self._models[model]
         new_priority = model_config.priority
+
+        # Handle default running model — stop it if conditions require
+        if self._default_running_model:
+            default_inst = self._instances.get(self._default_running_model)
+            if default_inst and default_inst.running and default_inst.default_running:
+                if default_inst.loading:
+                    # Default is processing a request — only stop if new request is higher priority
+                    default_pri = self._models[self._default_running_model].priority
+                    if new_priority <= default_pri:
+                        pass  # Keep default running
+                    else:
+                        if self.config.debug:
+                            print(f"[DEBUG] Stopping default model (higher priority request): {self._default_running_model}")
+                        await stop_instance(self._default_running_model, debug=self.config.debug)
+                        default_inst.running = False
+                        default_inst.healthy = False
+                        default_inst.default_running = False
+                        default_inst.preempted_at = time.time()
+                else:
+                    # Default is not actively processing — stop immediately
+                    if self.config.debug:
+                        print(f"[DEBUG] Stopping default model (not processing): {self._default_running_model}")
+                    await stop_instance(self._default_running_model, debug=self.config.debug)
+                    default_inst.running = False
+                    default_inst.healthy = False
+                    default_inst.default_running = False
 
         if self.config.debug:
             print(f"[DEBUG] Routing: model={model}, priority={new_priority}")

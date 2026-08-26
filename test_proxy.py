@@ -339,3 +339,178 @@ class TestPreemptionCooldown:
         assert resp.status == 429
         data = json.loads(resp.text)
         assert data["error"] == "server busy"
+
+
+class TestDefaultRunningModel:
+    @pytest.mark.asyncio
+    async def test_default_running_model_parsed_from_ini(self, tmp_path):
+        presets = tmp_path / "presets.ini"
+        presets.write_text(
+            "[high]\npriority = 10\nmodel = /models/high.gguf\n\n"
+            "[low]\npriority = 1\nmodel = /models/low.gguf\n\n"
+            "[*]\ndefault-running-model = low\n"
+        )
+        config = Config(port=0, ini_path=str(presets), work_dir=str(tmp_path))
+        router = ProxyRouter(config)
+        assert router._default_running_model == "low"
+
+    @pytest.mark.asyncio
+    async def test_default_running_model_not_parsed_without_priority(self, tmp_path):
+        presets = tmp_path / "presets.ini"
+        presets.write_text(
+            "[high]\npriority = 10\nmodel = /models/high.gguf\n\n"
+            "[low]\nmodel = /models/low.gguf\n\n"
+            "[*]\ndefault-running-model = low\n"
+        )
+        config = Config(port=0, ini_path=str(presets), work_dir=str(tmp_path))
+        router = ProxyRouter(config)
+        # low is not in registry because it has no priority
+        assert router._default_running_model is None
+
+    @pytest.mark.asyncio
+    async def test_default_running_model_idle_timer_skipped(self, tmp_path):
+        presets = tmp_path / "presets.ini"
+        presets.write_text(
+            "[high]\npriority = 10\nmodel = /models/high.gguf\n\n"
+            "[low]\npriority = 1\nmodel = /models/low.gguf\nsleep-idle-seconds = 60\n\n"
+            "[*]\ndefault-running-model = low\n"
+        )
+        config = Config(port=0, ini_path=str(presets), work_dir=str(tmp_path), debug=False)
+        router = ProxyRouter(config)
+        await router.register_routes()
+
+        low = router._models["low"]
+        low_inst = router._instances["low"]
+        low_inst.default_running = True
+        low_inst.running = True
+
+        await router._start_idle_timer("low")
+        assert "low" not in router._idle_timers
+
+    @pytest.mark.asyncio
+    async def test_default_running_model_not_started_when_normal(self, tmp_path):
+        presets = tmp_path / "presets.ini"
+        presets.write_text(
+            "[high]\npriority = 10\nmodel = /models/high.gguf\n\n"
+            "[low]\npriority = 1\nmodel = /models/low.gguf\nsleep-idle-seconds = 60\n\n"
+            "[*]\ndefault-running-model = low\n"
+        )
+        config = Config(port=0, ini_path=str(presets), work_dir=str(tmp_path), debug=False)
+        router = ProxyRouter(config)
+        await router.register_routes()
+
+        low = router._models["low"]
+        low_inst = router._instances["low"]
+        low_inst.default_running = False
+        low_inst.running = True
+
+        await router._start_idle_timer("low")
+        assert "low" in router._idle_timers
+
+    @pytest.mark.asyncio
+    async def test_default_running_model_stopped_on_higher_priority_request(self, tmp_path):
+        presets = tmp_path / "presets.ini"
+        presets.write_text(
+            "[high]\npriority = 10\nmodel = /models/high.gguf\n\n"
+            "[low]\npriority = 1\nmodel = /models/low.gguf\nsleep-idle-seconds = 60\n\n"
+            "[*]\ndefault-running-model = low\n"
+        )
+        config = Config(port=0, ini_path=str(presets), work_dir=str(tmp_path), debug=False)
+        router = ProxyRouter(config)
+        await router.register_routes()
+
+        high = router._models["high"]
+        low = router._models["low"]
+        high_inst = router._instances["high"]
+        low_inst = router._instances["low"]
+        high_inst.running = True
+        low_inst.running = True
+        low_inst.default_running = True
+
+        from unittest.mock import MagicMock, AsyncMock
+        from aiohttp import ClientSession
+        from aiohttp.web_response import Response
+
+        router._client = MagicMock(spec=ClientSession)
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.content_type = "application/json"
+        mock_resp.headers = {}
+        mock_resp.json = AsyncMock(return_value={})
+        router._client.post = AsyncMock(return_value=mock_resp)
+
+        req = MagicMock()
+        req.match_info = {"model": "high"}
+        req.headers = {}
+        req.method = "POST"
+        req.path = "/chat/completions/high"
+        async def mock_read():
+            return b'{"model": "high"}'
+        req.read = mock_read
+        req.query_string = ""
+        req.query = {}
+        req.version = (1, 1)
+        req.content_type = None
+        req.content = None
+        req.transport = None
+        req.app = router._app
+        req._cached = None
+
+        resp = await router.forward_request(req)
+        assert resp.status == 200
+        assert not low_inst.running
+        assert not low_inst.default_running
+
+    @pytest.mark.asyncio
+    async def test_default_running_model_kept_when_same_priority(self, tmp_path):
+        presets = tmp_path / "presets.ini"
+        presets.write_text(
+            "[high]\npriority = 10\nmodel = /models/high.gguf\n\n"
+            "[low]\npriority = 1\nmodel = /models/low.gguf\nsleep-idle-seconds = 60\n\n"
+            "[*]\ndefault-running-model = low\n"
+        )
+        config = Config(port=0, ini_path=str(presets), work_dir=str(tmp_path), debug=False)
+        router = ProxyRouter(config)
+        await router.register_routes()
+
+        high = router._models["high"]
+        low = router._models["low"]
+        high_inst = router._instances["high"]
+        low_inst = router._instances["low"]
+        high_inst.running = True
+        low_inst.running = True
+        low_inst.loading = True
+        low_inst.default_running = True
+
+        from unittest.mock import MagicMock, AsyncMock
+        from aiohttp import ClientSession
+
+        router._client = MagicMock(spec=ClientSession)
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.content_type = "application/json"
+        mock_resp.headers = {}
+        mock_resp.json = AsyncMock(return_value={})
+        router._client.post = AsyncMock(return_value=mock_resp)
+
+        req = MagicMock()
+        req.match_info = {"model": "low"}
+        req.headers = {}
+        req.method = "POST"
+        req.path = "/chat/completions/low"
+        async def mock_read():
+            return b'{"model": "low"}'
+        req.read = mock_read
+        req.query_string = ""
+        req.query = {}
+        req.version = (1, 1)
+        req.content_type = None
+        req.content = None
+        req.transport = None
+        req.app = router._app
+        req._cached = None
+
+        resp = await router.forward_request(req)
+        assert resp.status == 200
+        assert low_inst.running
+        assert low_inst.default_running

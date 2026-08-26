@@ -12,7 +12,7 @@ A drop-in replacement for llama.cpp's built-in router that adds **priority-based
 | SSE streaming passthrough | Yes | Yes |
 | Docker support | No | Yes — GPU passthrough built in |
 
-**In short:** If you already use llama.cpp's router mode with a `presets.ini`, you can switch to this proxy by adding two fields to your config. Higher-priority models automatically preempt lower ones, and idle instances shut down to reclaim GPU memory.
+**In short:** If you already use llama.cpp's router mode with a `presets.ini`, you can switch to this proxy by adding two fields to your config. Higher-priority models automatically preempt lower ones, idle instances shut down to reclaim GPU memory, and a default-running model stays alive when no higher-priority instances are active.
 
 ## Prerequisites
 
@@ -36,6 +36,7 @@ Copy your existing `presets.ini` into the project root. Add a `priority` field (
 ```ini
 [*]
 batch = 32
+default-running-model = llama3-8b
 
 [llama3-8b]
 priority = 1
@@ -58,6 +59,14 @@ model = /models/llama3-70b.gguf
 - Set to a number of seconds — the instance stops after that many seconds of no requests
 - Only fires when no other requests are pending for the model
 - Non-interactive endpoints (`/v1/models`, `/v1/props`, `/v1/metrics`) do not affect idle timers
+
+**How `default-running-model` works:**
+- Add `default-running-model = <section_name>` to the `[*]` section
+- The referenced model must have a `priority` field to be valid
+- When all higher-priority instances shut down (idle or preempted), the default model is automatically launched
+- While running as the default model, idle timeouts are disabled — the instance stays running
+- If a new request arrives for a higher-priority model, the default model is preempted
+- When the higher-priority request completes, the default model is relaunched automatically
 
 ### 3. Configure environment
 
@@ -132,6 +141,8 @@ These trigger preemption, idle timers, and instance lifecycle management:
 ## How priority preemption works
 
 When a request arrives for a higher-priority model than any running instance, the proxy terminates the lower-priority instance(s) before routing. If priority is equal or lower and no free instance exists, it returns HTTP 429 (server busy). A 2-second cooldown prevents re-accepting requests immediately after preemption.
+
+When all instances are stopped and a `default-running-model` is configured, the proxy automatically launches the default model so requests are always served. Once the default model is running, idle timeouts are disabled on it — it stays alive until preempted by a higher-priority request.
 
 ## Running locally (without Docker)
 
