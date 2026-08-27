@@ -531,6 +531,7 @@ class ProxyRouter:
                 status=resp.status, headers=resp_headers
             )
             await stream_response.prepare(request)
+            stream_ok = False
             try:
                 while True:
                     chunk = await resp.content.read(8192)
@@ -538,6 +539,7 @@ class ProxyRouter:
                         break
                     await stream_response.write(chunk)
                     await stream_response.drain()
+                stream_ok = True
             except asyncio.CancelledError:
                 pass
             except asyncio.TimeoutError:
@@ -550,8 +552,16 @@ class ProxyRouter:
                 pass
             finally:
                 await stream_response.write_eof()
-            await self._complete_request(model)
-            return stream_response
+            if stream_ok:
+                await self._complete_request(model)
+                return stream_response
+            else:
+                model_cfg = self._models.get(model)
+                if model_cfg:
+                    model_cfg.pending_requests -= 1
+                    if model_cfg.pending_requests < 0:
+                        model_cfg.pending_requests = 0
+                return stream_response
         else:
             try:
                 data = await resp.json()
