@@ -153,6 +153,9 @@ class ProxyRouter:
 
             await stop_instance(model_cfg.section_name)
 
+        # After bootstrap, launch the default model if configured
+        await self._launch_default_model()
+
     def _find_instance_to_terminate(self, new_priority: int) -> str | None:
         """Find a running instance with priority lower than the new request's priority."""
         for name, inst in self._instances.items():
@@ -221,6 +224,31 @@ class ProxyRouter:
             timer.cancel()
         self._idle_fired.discard(model)
 
+    async def _launch_default_model(self) -> None:
+        """Launch the default-running model if no instances are active."""
+        if not self._default_running_model:
+            return
+        # Check if any instance is running
+        for name, inst in self._instances.items():
+            if inst.running:
+                return
+        # No instances running — launch the default model
+        if self.config.debug:
+            print(f"[DEBUG] Launching default model={self._default_running_model}")
+        default_cfg = self._models[self._default_running_model]
+        await start_instance(default_cfg)
+        default_inst = self._instances[self._default_running_model]
+        if default_inst:
+            default_inst.default_running = True
+            if default_inst.port:
+                try:
+                    connected = await _wait_for_http_ready(default_inst.port, timeout=60)
+                    if connected:
+                        default_inst.loading = False
+                        default_inst.running = True
+                except Exception:
+                    pass
+
     async def _start_idle_timer(self, model: str) -> None:
         """Start (or restart) the idle timer for the given model."""
         model_cfg = self._models.get(model)
@@ -254,31 +282,7 @@ class ProxyRouter:
                     inst.running = False
                     inst.healthy = False
                 self._idle_timers[model] = None
-                # Check if this was the last running instance and we have a default model
-                if self._default_running_model:
-                    all_running = False
-                    for n, i in self._instances.items():
-                        if i.running:
-                            all_running = True
-                            break
-                    if not all_running:
-                        if self.config.debug:
-                            print(f"[DEBUG] All instances stopped, launching default model={self._default_running_model}")
-                        default_cfg = self._models[self._default_running_model]
-                        await start_instance(default_cfg)
-                        default_inst = self._instances[self._default_running_model]
-                        if default_inst:
-                            default_inst.default_running = True
-                            if default_inst.port:
-                                try:
-                                    connected = await _wait_for_http_ready(
-                                        default_inst.port, timeout=60
-                                    )
-                                    if connected:
-                                        default_inst.loading = False
-                                        default_inst.running = True
-                                except Exception:
-                                    pass
+                await self._launch_default_model()
             except asyncio.CancelledError:
                 raise
             except asyncio.TimeoutError:
