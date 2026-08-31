@@ -364,13 +364,17 @@ class ProxyRouter:
                         default_inst.default_running = False
                         default_inst.preempted_at = time.time()
                 else:
-                    # Default is not actively processing — stop immediately
-                    if self.config.debug:
-                        print(f"[DEBUG] Stopping default model (not processing): {self._default_running_model}")
-                    await stop_instance(self._default_running_model, debug=self.config.debug)
-                    default_inst.running = False
-                    default_inst.healthy = False
-                    default_inst.default_running = False
+                    # Default is not actively processing — stop only if routing elsewhere
+                    if model == self._default_running_model:
+                        # Routing to the same model — keep it running, don't lose warmup
+                        pass
+                    else:
+                        if self.config.debug:
+                            print(f"[DEBUG] Stopping default model (not processing): {self._default_running_model}")
+                        await stop_instance(self._default_running_model, debug=self.config.debug)
+                        default_inst.running = False
+                        default_inst.healthy = False
+                        default_inst.default_running = False
 
         if self.config.debug:
             print(f"[DEBUG] Routing: model={model}, priority={new_priority}")
