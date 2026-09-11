@@ -238,7 +238,8 @@ async def start_instance(
     return state
 
 
-async def stop_instance(model_name: str, debug: bool = False) -> None:
+async def stop_instance(model_name: str, debug: bool = False, router: "ProxyRouter | None" = None) -> None:
+    from llama_swap.proxy.router import ProxyRouter
     """Stop and remove an instance. Immediately frees GPU resources."""
     if debug:
         print(f"[DEBUG] stop_instance: model={model_name}")
@@ -246,6 +247,8 @@ async def stop_instance(model_name: str, debug: bool = False) -> None:
     container_name = f"llama_server_{safe}"
     inst = _instances.pop(model_name, None)
     if inst:
+        if router:
+            router._active_connections.discard(model_name)
         try:
             if debug:
                 print(f"[DEBUG] Removing container: {container_name}")

@@ -64,6 +64,7 @@ class ProxyRouter:
         self._models_response: dict | None = None
         self._props_cache: dict[str, dict] = {}
         self._default_running_model: str | None = self.registry.default_running_model
+        self._active_connections: set[str] = set()
 
         # Register models from registry
         port = config.start_port
@@ -127,7 +128,7 @@ class ProxyRouter:
             self._models_response = data
 
         # Tear down the bootstrap instance
-        await stop_instance("bootstrap")
+        await stop_instance("bootstrap", router=self)
 
         # For each model: start instance, fetch /props, cache, tear down
         for model_cfg in self.registry.models:
@@ -151,7 +152,7 @@ class ProxyRouter:
             except Exception:
                 pass
 
-            await stop_instance(model_cfg.section_name)
+            await stop_instance(model_cfg.section_name, router=self)
 
         # After bootstrap, launch the default model if configured
         await self._launch_default_model()
@@ -273,10 +274,13 @@ class ProxyRouter:
                 await asyncio.sleep(model_cfg.sleep_idle_seconds)
                 if model in self._idle_fired:
                     return
+                inst = self._instances.get(model)
+                if not inst or not inst.running:
+                    return
                 self._idle_fired.add(model)
                 if self.config.debug:
                     print(f"[DEBUG] Idle timeout reached for model={model}")
-                await stop_instance(model, debug=self.config.debug)
+                await stop_instance(model, debug=self.config.debug, router=self)
                 inst = self._instances.get(model)
                 if inst:
                     inst.running = False
@@ -329,6 +333,7 @@ class ProxyRouter:
         # Track which models have pending requests (idle timer should not fire)
         if model and model in self._models:
             self._models[model].pending_requests += 1
+            self._active_connections.add(model)
 
         if model not in self._models:
             if self.config.debug:
@@ -336,12 +341,6 @@ class ProxyRouter:
             return web.json_response(
                 {"error": f"unknown model: {model}"}, status=404
             )
-
-        model_cfg = self._models.get(model)
-        if model_cfg:
-            model_cfg.pending_requests -= 1
-            if model_cfg.pending_requests < 0:
-                model_cfg.pending_requests = 0
 
         model_config = self._models[model]
         new_priority = model_config.priority
@@ -358,7 +357,7 @@ class ProxyRouter:
                     else:
                         if self.config.debug:
                             print(f"[DEBUG] Stopping default model (higher priority request): {self._default_running_model}")
-                        await stop_instance(self._default_running_model, debug=self.config.debug)
+                        await stop_instance(self._default_running_model, debug=self.config.debug, router=self)
                         default_inst.running = False
                         default_inst.healthy = False
                         default_inst.default_running = False
@@ -371,7 +370,7 @@ class ProxyRouter:
                     else:
                         if self.config.debug:
                             print(f"[DEBUG] Stopping default model (not processing): {self._default_running_model}")
-                        await stop_instance(self._default_running_model, debug=self.config.debug)
+                        await stop_instance(self._default_running_model, debug=self.config.debug, router=self)
                         default_inst.running = False
                         default_inst.healthy = False
                         default_inst.default_running = False
@@ -392,7 +391,7 @@ class ProxyRouter:
             while to_terminate:
                 if self.config.debug:
                     print(f"[DEBUG] Terminating instance: {to_terminate}")
-                await stop_instance(to_terminate, debug=self.config.debug)
+                await stop_instance(to_terminate, debug=self.config.debug, router=self)
                 inst = self._instances.get(to_terminate)
                 if inst:
                     inst.running = False
@@ -539,7 +538,6 @@ class ProxyRouter:
                 status=resp.status, headers=resp_headers
             )
             await stream_response.prepare(request)
-            stream_ok = False
             try:
                 while True:
                     chunk = await resp.content.read(8192)
@@ -547,7 +545,6 @@ class ProxyRouter:
                         break
                     await stream_response.write(chunk)
                     await stream_response.drain()
-                stream_ok = True
             except asyncio.CancelledError:
                 pass
             except asyncio.TimeoutError:
@@ -560,32 +557,26 @@ class ProxyRouter:
                 pass
             finally:
                 await stream_response.write_eof()
-            if stream_ok:
                 await self._complete_request(model)
-                return stream_response
-            else:
-                model_cfg = self._models.get(model)
-                if model_cfg:
-                    model_cfg.pending_requests -= 1
-                    if model_cfg.pending_requests < 0:
-                        model_cfg.pending_requests = 0
-                return stream_response
+            return stream_response
         else:
             try:
-                data = await resp.json()
-            except Exception:
-                data = await resp.read()
-                data = {"error": data.decode()} if isinstance(data, bytes) else data
+                try:
+                    data = await resp.json()
+                except Exception:
+                    data = await resp.read()
+                    data = {"error": data.decode()} if isinstance(data, bytes) else data
 
-            if self.config.debug:
-                print(f"[DEBUG] Returning response status: {resp.status}")
-            filtered_headers = {
-                k: v
-                for k, v in resp.headers.items()
-                if k.lower() not in ("transfer-encoding", "connection", "content-type")
-            }
-            await self._complete_request(model)
-            return web.json_response(data, status=resp.status, headers=filtered_headers)
+                if self.config.debug:
+                    print(f"[DEBUG] Returning response status: {resp.status}")
+                filtered_headers = {
+                    k: v
+                    for k, v in resp.headers.items()
+                    if k.lower() not in ("transfer-encoding", "connection", "content-type")
+                }
+                return web.json_response(data, status=resp.status, headers=filtered_headers)
+            finally:
+                await self._complete_request(model)
 
     async def handle_metrics(self, request: web.Request) -> web.Response:
         """Proxy /metrics to the first healthy running instance, forwarding query params."""
@@ -709,7 +700,7 @@ class ProxyRouter:
         if self._client:
             await self._client.close()
         for name in list(self._instances):
-            await stop_instance(name, debug=self.config.debug)
+            await stop_instance(name, debug=self.config.debug, router=self)
 
     async def stop(self) -> None:
         await self.cleanup()
