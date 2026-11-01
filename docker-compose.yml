@@ -24,7 +24,7 @@ services:
          COPY pyproject.toml /app/pyproject.toml
          RUN pip install --no-cache-dir .
          ENTRYPOINT ["python", "-m", "llama_swap"]
-    image: local/llama-swap-priority:latest
+    image: ${IMAGE_NAME:-local/llama-swap-priority:latest}
     network_mode: host
     env_file: ${ENV_FILE:-./stack.env}
     deploy:
